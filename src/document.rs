@@ -206,9 +206,23 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
         }
         return;
     }
+    if matches!(mark.tool, Tool::Pen | Tool::Highlight)
+        && mark.points.iter().all(|p| p.distance(a) < 0.01)
+    {
+        let width = mark.width * if mark.tool == Tool::Highlight { 6. } else { 1. };
+        let mut pb = PathBuilder::new();
+        pb.push_circle(a.x, a.y, width / 2.);
+        let color = if mark.tool == Tool::Highlight {
+            highlight_color(mark.color)
+        } else {
+            mark.color
+        };
+        composite_path(image, pb.finish(), color, width, true);
+        return;
+    }
     let mut pb = PathBuilder::new();
     match mark.tool {
-        Tool::Pen => {
+        Tool::Pen | Tool::Highlight => {
             pb.move_to(a.x, a.y);
             for p in mark.points.iter().skip(1) {
                 pb.line_to(p.x, p.y);
@@ -229,7 +243,7 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
                 pb.line_to(right.x, right.y);
             }
         }
-        Tool::Rectangle | Tool::Highlight | Tool::Redact => {
+        Tool::Rectangle | Tool::Redact => {
             if let Some(r) =
                 tiny_skia::Rect::from_xywh(rect.min.x, rect.min.y, rect.width(), rect.height())
             {
@@ -246,9 +260,7 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
         _ => return,
     }
     let color = match mark.tool {
-        Tool::Highlight => {
-            Color32::from_rgba_unmultiplied(mark.color.r(), mark.color.g(), mark.color.b(), 75)
-        }
+        Tool::Highlight => highlight_color(mark.color),
         Tool::Redact => Color32::from_rgb(12, 16, 22),
         _ => mark.color,
     };
@@ -256,8 +268,8 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
         image,
         pb.finish(),
         color,
-        mark.width,
-        matches!(mark.tool, Tool::Highlight | Tool::Redact),
+        mark.width * if mark.tool == Tool::Highlight { 6. } else { 1. },
+        matches!(mark.tool, Tool::Redact),
     );
 }
 fn composite_path(
@@ -288,7 +300,8 @@ fn composite_path(
     }
     let mut pixmap = Pixmap::new(right - x, bottom - y).unwrap();
     let mut paint = Paint::default();
-    paint.set_color_rgba8(color.r(), color.g(), color.b(), color.a());
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    paint.set_color_rgba8(r, g, b, a);
     let transform = Transform::from_translate(-(x as f32), -(y as f32));
     if fill {
         pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
@@ -330,6 +343,7 @@ fn blend(image: &mut RgbaImage, x: u32, y: u32, rgba: [u8; 4]) {
     pixel.0[3] = 255;
 }
 pub fn draw_text(image: &mut RgbaImage, text: &str, pos: Pos2, size: f32, color: Color32) {
+    let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
     let font = FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
     let scaled = font.as_scaled(size);
     let mut cursor = ab_glyph::point(pos.x, pos.y + scaled.ascent());
@@ -358,12 +372,7 @@ pub fn draw_text(image: &mut RgbaImage, text: &str, pos: Pos2, size: f32, color:
                         image,
                         x as u32,
                         y as u32,
-                        [
-                            color.r(),
-                            color.g(),
-                            color.b(),
-                            (coverage * color.a() as f32) as u8,
-                        ],
+                        [red, green, blue, (coverage * alpha as f32) as u8],
                     );
                 }
             });
@@ -437,6 +446,11 @@ pub fn demo_image() -> RgbaImage {
     image
 }
 
+pub fn highlight_color(color: Color32) -> Color32 {
+    let [r, g, b, a] = color.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(r, g, b, (u16::from(a) * 75 / 255) as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +505,23 @@ mod tests {
         assert_eq!(image.get_pixel(10, 11).0, [12, 16, 22, 255]);
         assert_eq!(image.get_pixel(20, 21).0, [12, 16, 22, 255]);
         assert_eq!(image.get_pixel(9, 11).0, [255; 4]);
+    }
+    #[test]
+    fn translucent_pen_and_highlighter_keep_the_selected_rgb() {
+        for (tool, alpha, expected) in [(Tool::Pen, 128, 127), (Tool::Highlight, 255, 180)] {
+            let mut d = doc();
+            d.add(Mark {
+                tool,
+                points: vec![Pos2::new(50., 50.); 3],
+                color: Color32::from_rgba_unmultiplied(255, 0, 0, alpha),
+                width: 4.,
+                text: String::new(),
+            });
+            let image = d.export();
+            let [r, g, b, a] = image.get_pixel(50, 50).0;
+            assert_eq!((r, a), (255, 255));
+            assert!((i32::from(g) - expected).abs() <= 1 && (i32::from(b) - expected).abs() <= 1);
+        }
     }
     #[test]
     fn exported_text_and_arrow_change_pixels() {

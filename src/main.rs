@@ -2,9 +2,10 @@ mod app;
 mod capture;
 mod clipboard;
 mod document;
+mod file_picker;
+mod gpu;
 mod keyboard;
 mod overlay;
-mod raster;
 
 use anyhow::{Context, Result, bail};
 use std::{

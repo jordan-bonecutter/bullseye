@@ -40,10 +40,13 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
     config = runtime / 'sway.conf'
     config.write_text('output HEADLESS-1 mode 1440x900\nxwayland disable\nseat seat0 fallback true\ndefault_border none\n')
     env = os.environ.copy()
-    for key in ('WAYLAND_DISPLAY', 'DISPLAY', 'SWAYSOCK', 'WAYLAND_SOCKET'):
+    for key in ('WAYLAND_DISPLAY', 'DISPLAY', 'SWAYSOCK', 'WAYLAND_SOCKET', 'DBUS_SESSION_BUS_ADDRESS'):
         env.pop(key, None)
-    env.update(XDG_RUNTIME_DIR=temp, WLR_BACKENDS='headless', WLR_RENDERER='pixman', WLR_LIBINPUT_NO_DEVICES='1',XKB_DEFAULT_LAYOUT='us')
+    env.update(XDG_RUNTIME_DIR=temp, WLR_BACKENDS='headless', WLR_RENDERER='pixman', WLR_LIBINPUT_NO_DEVICES='1',XKB_DEFAULT_LAYOUT='us',LIBGL_ALWAYS_SOFTWARE='1')
     processes = []
+    bus = subprocess.Popen(['dbus-daemon','--session','--nofork',f'--address=unix:path={runtime}/bus','--print-address=1'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    env['DBUS_SESSION_BUS_ADDRESS'] = bus.stdout.readline().strip()
+    assert str(runtime) in env['DBUS_SESSION_BUS_ADDRESS']
     with (ARTIFACTS / 'sway.log').open('w') as log:
         sway = subprocess.Popen(['sway', '-c', str(config)], env=env, stdout=log, stderr=log)
         try:
@@ -111,7 +114,12 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             drag(300, 200, 1000, 600)
             selected = wait_for(lambda: (s := state()) if state()['phase'] == 'annotate' and state()['buttons'] and state().get('toolbar_visible') else None, 'No annotation toolbar')
             assert selected['crop'] == [300, 200, 700, 400], selected
-            snapshot('minimal-toolbar.png')
+            toolbar=snapshot('minimal-toolbar.png')
+            px,py=selected['buttons']['p']
+            icon_bytes=toolbar.crop((int(px)-10,int(py)-10,int(px)+10,int(py)+10)).tobytes()
+            colors={icon_bytes[i:i+3] for i in range(0,len(icon_bytes),3)}
+            assert len(colors)>8,'Icon edges have no antialiasing coverage'
+            assert 'Bullseye EGL renderer:' in (ARTIFACTS/'selection.log').read_text(),'GPU rendering path not active'
             x, y = selected['buttons']['save']
             click(x, y)
             assert overlay.wait(timeout=10) == 0
@@ -144,15 +152,111 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             wait_for(lambda: state() if state().get('text') is not None else None,'Text field did not appear')
             input_actions('wait 400\ntype hello\nwait 400\n')
             wait_for(lambda: state() if state().get('text') == 'hello' else None,'Text entry failed')
+            preview=snapshot('live-text-preview.png')
+            assert ImageChops.difference(preview.crop((450,350,550,390)),base.crop((450,350,550,390))).getbbox(),'Text has no live preview'
             input_actions('key 28\nwait 300\n')
             selected = wait_for(lambda: state() if state()['marks'] == 1 else None, 'Caption was not committed')
-            snapshot('text-overlay.png')
+            text_preview=snapshot('text-overlay.png')
             input_actions('shortcut c\nwait 300\n')
             assert overlay.wait(timeout=15) == 0
             png = run(['wl-paste','--no-newline','--type','image/png'], env)
             (ARTIFACTS/'text-export.png').write_bytes(png)
             assert ImageChops.difference(Image.open(ARTIFACTS/'text-export.png').convert('RGB'),base.crop((300,200,1000,600))).getbbox()
+            text_export=Image.open(ARTIFACTS/'text-export.png').convert('RGB')
+            crop_base=base.crop((450,350,550,390))
+            preview_bounds=ImageChops.difference(text_preview.crop((450,350,550,390)),crop_base).getbbox()
+            export_bounds=ImageChops.difference(text_export.crop((150,150,250,190)),crop_base).getbbox()
+            assert all(abs(a-b)<=2 for a,b in zip(preview_bounds,export_bounds)),(preview_bounds,export_bounds)
             print('PASS text placement, compositor keymap, and Ctrl+C', flush=True)
+
+            # Stationary pen clicks must produce pixels, even without pointer motion.
+            dots_path=ARTIFACTS/'dots-export.png'
+            overlay,state=launch('dots',('--demo','--save-to',str(dots_path)))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No dot toolbar')
+            for i in range(12):
+                click(430+i*20,350)
+            selected=wait_for(lambda:state() if state()['marks']==12 else None,'Stationary clicks dropped dots')
+            snapshot('dots-overlay.png')
+            click(*selected['buttons']['save'])
+            assert overlay.wait(timeout=10)==0
+            dots=Image.open(dots_path).convert('RGB')
+            for i in range(12):
+                assert dots.getpixel((130+i*20,150)) != base.getpixel((430+i*20,350)),'A dot is invisible'
+            print('PASS all stationary pen clicks export visible dots',flush=True)
+
+            highlight_path=ARTIFACTS/'highlighter-export.png'
+            overlay,state=launch('highlighter',('--demo','--save-to',str(highlight_path)))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No highlighter toolbar')
+            click(*selected['buttons']['h'])
+            input_actions('move 450 300\npress\nmove 525 300\nmove 600 300\nmove 600 400\nmove 600 500\nrelease\nwait 200\n')
+            selected=wait_for(lambda:state() if state()['marks']==1 else None,'Highlighter stroke missing')
+            snapshot('highlighter-overlay.png')
+            click(*selected['buttons']['save'])
+            assert overlay.wait(timeout=10)==0
+            highlight=Image.open(highlight_path).convert('RGB')
+            assert highlight.getpixel((225,100)) != base.getpixel((525,300)),'Stroke not highlighted'
+            assert highlight.getpixel((150,250)) == base.getpixel((450,450)),'Highlighter filled its bounding rectangle'
+            print('PASS highlighter follows a bent pen stroke, leaving its bounding-box interior untouched',flush=True)
+
+            overlay,state=launch('color-picker',('--demo',))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No color toolbar')
+            initial=selected['color']
+            click(*selected['buttons']['color'])
+            selected=wait_for(lambda:state() if 'color-picker' in state()['buttons'] else None,'Full color picker missing')
+            snapshot('color-picker.png')
+            click(*selected['buttons']['color-picker'])
+            wait_for(lambda:state() if state()['color']!=initial else None,'Color picker did not edit color')
+            input_actions('key 1\nwait 200\n')
+            if overlay.poll() is None:
+                input_actions('key 1\nwait 200\n')
+            assert overlay.wait(timeout=10)==0
+            print('PASS full color picker changes the drawing color',flush=True)
+
+            # Mock only the portal service, on our own D-Bus daemon. The app performs real D-Bus requests.
+            portal_control=runtime/'portal-response'
+            portal_path=ARTIFACTS/'portal-export.png'
+            portal_path.unlink(missing_ok=True)
+            portal_control.write_text(str(portal_path))
+            handle=(ARTIFACTS/'portal.log').open('w')
+            portal=subprocess.Popen([str(ROOT/'target/debug/examples/headless-portal'),str(portal_control)],env=env,stdout=handle,stderr=handle)
+            processes.append((portal,handle))
+            wait_for(lambda:portal_control.with_suffix('.ready').exists(),'Private portal did not start')
+            overlay,state=launch('portal-save',('--demo',))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No portal toolbar')
+            click(*selected['buttons']['save'])
+            assert overlay.wait(timeout=15)==0,'Portal save did not close overlay'
+            assert ImageChops.difference(Image.open(portal_path).convert('RGB'),base.crop((300,200,1000,600))).getbbox() is None
+            portal_control.write_text('cancel')
+            overlay,state=launch('portal-cancel',('--demo',))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No cancel toolbar')
+            before_frame=selected['frame']
+            click(*selected['buttons']['save'])
+            selected=wait_for(lambda:state() if state()['frame']>before_frame+1 and not state().get('picker') else None,'Portal cancellation did not return')
+            assert overlay.poll() is None and selected['crop']==[300,200,700,400]
+            click(*selected['buttons']['p'])
+            click(500,350)
+            wait_for(lambda:state() if state()['marks']==1 else None,'Overlay did not regain input after cancellation')
+            input_actions('key 1\nwait 200\n')
+            assert overlay.wait(timeout=10)==0
+            print('PASS real portal SaveFile request, exact PNG save, cancellation, and restored input',flush=True)
+
+            portal_control.write_text('error')
+            overlay,state=launch('portal-fallback',('--demo',))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No fallback toolbar')
+            click(*selected['buttons']['save'])
+            wait_for(lambda:state() if state().get('save_dialog') else None,'Missing fallback when portal fails')
+            snapshot('save-fallback.png')
+            input_actions('key 1\nwait 200\n')
+            assert overlay.poll() is None,'Canceling path dialog closed the capture'
+            input_actions('key 1\nwait 200\n')
+            assert overlay.wait(timeout=10)==0
+            print('PASS missing system chooser falls back to a cancellable path dialog',flush=True)
 
             # Cover a real changing surface, rather than importing a fixture as the screenshot.
             control = runtime / 'desktop-mode'
@@ -213,7 +317,7 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             second_path=ARTIFACTS/'second-output-selection.png'
             second_path.unlink(missing_ok=True)
             overlay,state=launch('multi-output',('--save-to',str(second_path)))
-            wait_for(lambda: snapshot('multi-output-overlay.png').getpixel((20,20))==(15,63,100),'First output is not covered by its frozen snapshot')
+            wait_for(lambda: all(abs(a-b)<=1 for a,b in zip(snapshot('multi-output-overlay.png').getpixel((20,20)),(15,63,100))),'First output is not covered by its frozen snapshot')
             drag(1520,200,1940,500)
             selected=wait_for(lambda:state() if state().get('toolbar_visible') and state()['output']=='HEADLESS-2' else None,'Second output did not accept selection')
             assert selected['crop']==[80,200,420,300],selected
@@ -230,6 +334,8 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
                     process.wait(timeout=5)
                 if handle:
                     handle.close()
+            bus.terminate()
+            bus.wait(timeout=5)
             sway.terminate()
             try:
                 sway.wait(timeout=5)

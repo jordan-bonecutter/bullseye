@@ -7,10 +7,11 @@ overlays then show those frozen pixels, with a crosshair cursor. Drag to select;
 floating toolbar appears next to the selection. You keep working on the captured desktop.
 Copying or saving successfully dismisses the overlay.
 
-There are no sidebars, editor window, decorative canvas, or GPU context. The application
-uses Rust Wayland clients, egui for the small controls, and a software renderer that writes
-shared-memory buffers directly to the compositor. Runtime does not invoke `grim`, `slurp`,
-`wl-copy`, or other capture helpers, and uses no GTK or Qt.
+The application uses Rust Wayland clients and EGL/OpenGL ES to render directly into
+the layer-shell surfaces. The frozen screenshot is uploaded once; selection shading,
+strokes, text previews, and antialiased controls are drawn on the GPU. Compositor frame
+callbacks pace rendering and coalesce pointer updates. Runtime does not invoke `grim`,
+`slurp`, `wl-copy`, or other capture helpers, and the app UI uses no GTK or Qt.
 
 ## Run
 
@@ -24,7 +25,9 @@ cargo run -- --list-outputs
 
 Requires a recent Rust toolchain (edition 2024; dependencies require Rust 1.88+), a Wayland
 session with **wlr-screencopy and wlr-layer-shell**, and `libxkbcommon` for keyboard input.
-Sway is the tested compositor. EGL/OpenGL drivers are not required.
+Sway is the tested compositor. Rendering requires libwayland-client, libwayland-egl,
+and an EGL driver supporting OpenGL ES 3. The compositor may use its normal hardware
+driver; headless tests exercise the same rendering path with Mesa llvmpipe.
 
 ## Use
 
@@ -33,13 +36,20 @@ Sway is the tested compositor. EGL/OpenGL drivers are not required.
 2. Drag out a region. Resize it with the corner handles, or choose the selection tool
    to move it. Selection is contained within one display.
 3. Pick pen, arrow, rectangle, ellipse, highlight, redaction, text, or numbered pins.
-   The color button opens a small palette and stroke-width control.
-4. For text, click the text tool, then click inside the selection. Type a caption and
-   press Enter or Add to place it.
+   The highlighter draws a broad translucent pen stroke. Stationary pen clicks make dots.
+   The color button opens a full hue/saturation/value, RGBA, and opacity picker, plus
+   the stroke-width control.
+4. For text, click the text tool, then click inside the selection. Type a caption; its
+   preview appears directly on the image. Press Enter, click elsewhere, or export to
+   finish it; Escape discards the pending caption.
 5. Copy to the Wayland clipboard, or save as PNG. The overlay closes after success.
    Escape or right-click cancels without exporting.
 
-Save opens a small path dialog, initially pointing into `~/Pictures/Bullseye/`.
+Save asks the system file chooser through the XDG desktop portal. Install a portal
+frontend and a backend providing FileChooser, such as your desktop’s portal backend.
+The capture yields its overlay layer and keyboard focus while the chooser is open;
+canceling restores the frozen capture. If the portal is unavailable, a small path dialog
+is offered, initially pointing into `~/Pictures/Bullseye/`.
 Use `--save-to /path/to/shot.png` to choose a destination in advance and save immediately
 when clicking Save. PNG export contains only the selected native-resolution pixels and
 annotations. UI, dimming, and the crosshair are excluded. `--cursor` includes the original
@@ -97,20 +107,24 @@ cargo build --examples
 python3 scripts/headless-test.py
 ```
 
-The integration tests require Sway, wl-paste, Python 3, and Pillow. They start an isolated,
+The integration tests require Sway, wl-paste, dbus-daemon, Mesa EGL, Python 3, and Pillow. They start an isolated,
 software-rendered headless compositor in a private `/tmp` runtime directory and remove
-all host Wayland/display/IPC socket variables. Both the Rust input driver and changing
-desktop fixture refuse to run outside that private headless environment. Testing never
-opens a window in your desktop session.
+all host Wayland/display/IPC and D-Bus socket variables. The Rust input driver, changing
+desktop fixture, and mock portal refuse to run outside that private environment. A
+private D-Bus daemon serves test SaveFile responses; the host portal is never contacted.
+Testing never opens a window in your desktop session.
 
 The suite checks the actual crosshair, exact region selection, toolbar actions, drawings,
-text entry through a virtual keyboard, clipboard persistence, saving and dismissal,
+inline text previews through a virtual keyboard, stationary dots, bent highlighter
+strokes, icon antialiasing, full color selection, clipboard persistence, portal saving,
+cancellation, unavailable-portal fallback, and dismissal,
 HiDPI mapping, and multiple displays. A real hover-content fixture changes behind the
 capture overlay; its exported pixels must still exactly match the original hover content.
 Screenshots and logs are written to `target/headless-artifacts/`.
 
 Unit tests additionally cover native screenshot buffer decoding, crop/history behavior,
-redaction edges, atomic PNG export, batched pointer events, and text/toolbar interactions.
+redaction edges, color alpha compositing, atomic PNG export, batched pointer events,
+text/toolbar interactions, and reuse of the frozen texture during dragging.
 
 ## Current limits
 

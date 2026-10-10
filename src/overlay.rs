@@ -1,5 +1,5 @@
 //! Real layer-shell overlays: capture first, then cover each output with its frozen image.
-use crate::{app::OverlayUi, keyboard::Keyboard, raster::Raster};
+use crate::{app::OverlayUi, gpu::Gpu, keyboard::Keyboard};
 use anyhow::{Context, Result, bail};
 use egui::{Event, Modifiers, Pos2, Vec2};
 use image::RgbaImage;
@@ -14,8 +14,8 @@ use wayland_client::{
     Connection, Dispatch, QueueHandle, WEnum, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm,
-        wl_shm_pool, wl_surface,
+        wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry,
+        wl_seat, wl_shm, wl_shm_pool, wl_surface,
     },
 };
 use wayland_protocols::wp::viewporter::client::{wp_viewport, wp_viewporter};
@@ -27,8 +27,6 @@ struct Slot {
     file: File,
     buffer: wl_buffer::WlBuffer,
     busy: bool,
-    width: u32,
-    height: u32,
 }
 struct View {
     name: String,
@@ -39,15 +37,14 @@ struct View {
     width: u32,
     height: u32,
     ui: OverlayUi,
-    raster: Raster,
+    gpu: Option<Gpu>,
     input: Vec<Event>,
     dirty: bool,
+    frame_pending: bool,
     repaint_at: Option<Instant>,
-    slots: Vec<Slot>,
 }
 struct State {
     views: Vec<View>,
-    shm: wl_shm::WlShm,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard_proxy: Option<wl_keyboard::WlKeyboard>,
     keyboard: Option<Keyboard>,
@@ -57,6 +54,7 @@ struct State {
     selected: Option<usize>,
     position: Pos2,
     primary_down: bool,
+    picking: bool,
     cursor_surface: wl_surface::WlSurface,
     cursor_slot: Slot,
     exit: bool,
@@ -66,7 +64,6 @@ struct State {
 #[derive(Clone, Copy)]
 struct BufferData {
     view: usize,
-    slot: usize,
 }
 
 pub fn run(
@@ -86,16 +83,7 @@ pub fn run(
         .context("The compositor must support wlr-layer-shell for desktop selection")?;
     let viewporter: Option<wp_viewporter::WpViewporter> = globals.bind(&qh, 1..=1, ()).ok();
     let cursor_surface = compositor.create_surface(&qh, ());
-    let mut cursor_slot = allocate(
-        &shm,
-        &qh,
-        32,
-        32,
-        BufferData {
-            view: usize::MAX,
-            slot: 0,
-        },
-    )?;
+    let mut cursor_slot = allocate(&shm, &qh, 32, 32, BufferData { view: usize::MAX })?;
     let mut cursor = RgbaImage::new(32, 32);
     for y in 0..32 {
         for x in 0..32 {
@@ -115,7 +103,6 @@ pub fn run(
     cursor_surface.commit();
     let mut state = State {
         views: vec![],
-        shm,
         pointer: None,
         keyboard_proxy: None,
         keyboard: None,
@@ -125,6 +112,7 @@ pub fn run(
         selected: None,
         position: Pos2::ZERO,
         primary_down: false,
+        picking: false,
         cursor_surface,
         cursor_slot,
         exit: false,
@@ -153,11 +141,11 @@ pub fn run(
                     destination.clone(),
                     explicit_destination,
                 ),
-                raster: Raster::default(),
+                gpu: None,
                 input: vec![],
                 dirty: false,
+                frame_pending: false,
                 repaint_at: None,
-                slots: vec![],
             });
         }
     }
@@ -204,7 +192,7 @@ pub fn run(
     conn.flush()?;
     while !state.exit {
         queue.dispatch_pending(&mut state)?;
-        state.render(&qh)?;
+        state.render(&conn, &qh)?;
         conn.flush()?;
         if state.exit {
             break;
@@ -222,16 +210,25 @@ pub fn run(
                 &fd,
                 rustix::event::PollFlags::IN,
             )];
+            let delay = state
+                .views
+                .iter()
+                .filter_map(|v| v.repaint_at)
+                .map(|at| at.saturating_duration_since(Instant::now()))
+                .min()
+                .unwrap_or(Duration::from_millis(100))
+                .min(Duration::from_millis(100));
             let timeout = rustix::event::Timespec {
                 tv_sec: 0,
-                tv_nsec: 100_000_000,
+                tv_nsec: delay.as_nanos() as i64,
             };
             if rustix::event::poll(&mut poll, Some(&timeout))? > 0 {
                 guard.read()?;
             }
         }
     }
-    for view in &state.views {
+    for view in &mut state.views {
+        view.gpu.take();
         if let Some(layer) = &view.layer {
             layer.destroy();
         }
@@ -273,8 +270,6 @@ fn allocate(
         file,
         buffer,
         busy: false,
-        width,
-        height,
     })
 }
 fn write_buffer(slot: &mut Slot, image: &RgbaImage) -> Result<()> {
@@ -292,15 +287,23 @@ fn write_buffer(slot: &mut Slot, image: &RgbaImage) -> Result<()> {
     Ok(())
 }
 impl State {
-    fn render(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+    fn render(&mut self, conn: &Connection, qh: &QueueHandle<Self>) -> Result<()> {
         let metadata = std::env::var_os("BULLSEYE_TEST_STATE").map(|_|self.views.iter().map(|v|serde_json::json!({"name":v.name,"logical":[v.width,v.height],"native":[v.ui.doc.original.width(),v.ui.doc.original.height()],"mapped":v.surface.is_some()})).collect::<Vec<_>>());
         for idx in 0..self.views.len() {
             let view = &mut self.views[idx];
+            if view.ui.picker_active() {
+                view.ui.poll_picker();
+                view.repaint_at = Some(Instant::now() + Duration::from_millis(30));
+                view.dirty = true;
+                if view.ui.done {
+                    self.exit = true;
+                }
+            }
             if view.repaint_at.is_some_and(|at| Instant::now() >= at) {
                 view.dirty = true;
                 view.repaint_at = None;
             }
-            if !view.dirty || view.width == 0 || view.height == 0 {
+            if !view.dirty || view.frame_pending || view.width == 0 || view.height == 0 {
                 continue;
             }
             let Some(surface) = view.surface.clone() else {
@@ -312,30 +315,8 @@ impl State {
             } else {
                 (view.width, view.height)
             };
-            let slot = if let Some(i) = view.slots.iter().position(|s| !s.busy) {
-                i
-            } else if view.slots.len() < 3 {
-                let i = view.slots.len();
-                view.slots.push(allocate(
-                    &self.shm,
-                    qh,
-                    buffer_size.0,
-                    buffer_size.1,
-                    BufferData { view: idx, slot: i },
-                )?);
-                i
-            } else {
-                continue;
-            };
-            if (view.slots[slot].width, view.slots[slot].height) != buffer_size {
-                view.slots[slot].buffer.destroy();
-                view.slots[slot] = allocate(
-                    &self.shm,
-                    qh,
-                    buffer_size.0,
-                    buffer_size.1,
-                    BufferData { view: idx, slot },
-                )?;
+            if view.gpu.is_none() {
+                view.gpu = Some(Gpu::new(conn, &surface, buffer_size)?);
             }
             let active = self.selected.is_none_or(|selected| selected == idx);
             let ppp = buffer_size.0 as f32 / view.width as f32;
@@ -352,19 +333,8 @@ impl State {
                 .get_mut(&egui::ViewportId::ROOT)
                 .unwrap()
                 .native_pixels_per_point = Some(ppp);
+            let frame_started = Instant::now();
             let output = view.ui.frame(raw, logical, active);
-            let mut image = view.ui.background(active);
-            if image.dimensions() != buffer_size {
-                image = image::imageops::resize(
-                    &image,
-                    buffer_size.0,
-                    buffer_size.1,
-                    image::imageops::FilterType::Triangle,
-                );
-            }
-            for (id, delta) in &output.textures_delta.set {
-                view.raster.update(*id, delta);
-            }
             let repaint_delay = output
                 .viewport_output
                 .get(&egui::ViewportId::ROOT)
@@ -375,19 +345,17 @@ impl State {
                 .ui
                 .ctx
                 .tessellate(output.shapes, output.pixels_per_point);
-            view.raster
-                .draw(&mut image, &primitives, output.pixels_per_point);
-            for id in output.textures_delta.free {
-                view.raster.free(id);
-            }
-            write_buffer(&mut view.slots[slot], &image)?;
             if let Some(viewport) = &view.viewport {
                 viewport.set_destination(view.width as i32, view.height as i32);
             }
-            surface.attach(Some(&view.slots[slot].buffer), 0, 0);
-            surface.damage_buffer(0, 0, buffer_size.0 as i32, buffer_size.1 as i32);
-            surface.commit();
-            view.slots[slot].busy = true;
+            surface.frame(qh, idx);
+            view.frame_pending = true;
+            view.gpu.as_mut().unwrap().paint(
+                buffer_size,
+                output.pixels_per_point,
+                &primitives,
+                &output.textures_delta,
+            )?;
             view.dirty = false;
             if let Ok(path) = std::env::var("BULLSEYE_TEST_STATE")
                 && std::env::var("XDG_RUNTIME_DIR")
@@ -401,13 +369,17 @@ impl State {
                     .map(|(k, r)| (k.clone(), serde_json::json!([r.center().x, r.center().y])))
                     .collect();
                 let (x, y, w, h) = view.ui.doc.crop_pixels();
-                let data = serde_json::json!({"views":metadata,"output":view.name,"phase":if view.ui.doc.crop.is_some(){"annotate"}else{"select"},"buttons":hits,"crop":[x,y,w,h],"marks":view.ui.doc.marks.len(),"logical":[view.width,view.height],"frame":view.ui.ctx.cumulative_frame_nr(),"primitives":primitives.len(),"toolbar_visible":view.ui.toolbar_visible,"text":view.ui.pending_text(),"tool":view.ui.tool(),"bar_pixel":view.ui.hits.get("save").map(|r|image.get_pixel((r.center().x*ppp) as u32,(r.center().y*ppp) as u32).0),"repaint_ms":repaint_delay.as_millis().min(1000000)});
+                let data = serde_json::json!({"views":metadata,"output":view.name,"phase":if view.ui.doc.crop.is_some(){"annotate"}else{"select"},"buttons":hits,"crop":[x,y,w,h],"marks":view.ui.doc.marks.len(),"logical":[view.width,view.height],"frame":view.ui.ctx.cumulative_frame_nr(),"primitives":primitives.len(),"toolbar_visible":view.ui.toolbar_visible,"text":view.ui.pending_text(),"tool":view.ui.tool(),"color":view.ui.color(),"render_us":frame_started.elapsed().as_micros(),"texture_updates":output.textures_delta.set.len(),"picker":view.ui.picker_active(),"save_dialog":view.ui.fallback_dialog(),"repaint_ms":repaint_delay.as_millis().min(1000000)});
                 let parent = std::path::Path::new(&path)
                     .parent()
                     .unwrap_or(std::path::Path::new("."));
                 let mut file = tempfile::NamedTempFile::new_in(parent)?;
                 file.write_all(&serde_json::to_vec(&data)?)?;
                 file.persist(path)?;
+            }
+            view.ui.start_picker();
+            if view.ui.picker_active() {
+                view.repaint_at = Some(Instant::now() + Duration::from_millis(30));
             }
             let claimed = view.ui.claimed;
             if view.ui.done {
@@ -429,9 +401,33 @@ impl State {
                 }
             }
         }
+        let picking = self.views.iter().any(|v| v.ui.picker_active());
+        if self.picking != picking {
+            self.picking = picking;
+            for v in &self.views {
+                if let Some(layer) = &v.layer {
+                    layer.set_layer(if picking {
+                        shell::Layer::Bottom
+                    } else {
+                        shell::Layer::Overlay
+                    });
+                    layer.set_keyboard_interactivity(if picking {
+                        layer::KeyboardInteractivity::None
+                    } else {
+                        layer::KeyboardInteractivity::Exclusive
+                    });
+                    if let Some(surface) = &v.surface {
+                        surface.commit();
+                    }
+                }
+            }
+        }
         Ok(())
     }
     fn input(&mut self, idx: usize, event: Event) {
+        if self.picking {
+            return;
+        }
         if let Some(view) = self.views.get_mut(idx) {
             view.input.push(event);
             view.dirty = true;
@@ -664,16 +660,10 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wl_buffer::Event::Release = event {
-            if data.view == usize::MAX {
-                state.cursor_slot.busy = false;
-            } else if let Some(slot) = state
-                .views
-                .get_mut(data.view)
-                .and_then(|v| v.slots.get_mut(data.slot))
-            {
-                slot.busy = false;
-            }
+        if let wl_buffer::Event::Release = event
+            && data.view == usize::MAX
+        {
+            state.cursor_slot.busy = false;
         }
     }
 }
@@ -684,3 +674,18 @@ delegate_noop!(State: ignore wl_shm_pool::WlShmPool);
 delegate_noop!(State: ignore shell::ZwlrLayerShellV1);
 delegate_noop!(State: ignore wp_viewporter::WpViewporter);
 delegate_noop!(State: ignore wp_viewport::WpViewport);
+
+impl Dispatch<wl_callback::WlCallback, usize> for State {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        idx: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.views[*idx].frame_pending = false;
+        }
+    }
+}

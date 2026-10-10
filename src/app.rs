@@ -1,5 +1,5 @@
 //! A selection and a small toolbar, drawn directly over the frozen desktop.
-use crate::document::{Document, Mark, Tool};
+use crate::document::{Document, Mark, Tool, highlight_color};
 use egui::{Align2, Color32, Context, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use image::RgbaImage;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -22,7 +22,9 @@ pub struct OverlayUi {
     moving: Option<(Rect, Pos2)>,
     text_anchor: Option<Pos2>,
     text: String,
-    text_focus: bool,
+    frozen: Option<egui::TextureHandle>,
+    save_request: bool,
+    picker: Option<std::sync::mpsc::Receiver<anyhow::Result<Option<PathBuf>>>>,
     save_dialog: bool,
     destination: String,
     explicit_destination: bool,
@@ -57,7 +59,9 @@ impl OverlayUi {
             moving: None,
             text_anchor: None,
             text: String::new(),
-            text_focus: false,
+            frozen: None,
+            save_request: false,
+            picker: None,
             save_dialog: false,
             destination: destination.display().to_string(),
             explicit_destination,
@@ -66,6 +70,9 @@ impl OverlayUi {
     }
     pub fn pending_text(&self) -> Option<&str> {
         self.text_anchor.map(|_| self.text.as_str())
+    }
+    pub fn color(&self) -> [u8; 4] {
+        self.color.to_srgba_unmultiplied()
     }
     pub fn tool(&self) -> &'static str {
         self.tool.shortcut()
@@ -77,12 +84,14 @@ impl OverlayUi {
         self.text_anchor = None;
     }
     fn save(&mut self) {
+        self.commit_text();
         match crate::save_png(&self.doc.export(), std::path::Path::new(&self.destination)) {
             Ok(()) => self.done = true,
             Err(e) => self.error = Some(format!("Save failed: {e:#}")),
         }
     }
     fn copy(&mut self) {
+        self.commit_text();
         match crate::clipboard::copy(&self.doc.export()) {
             Ok(()) => self.done = true,
             Err(e) => self.error = Some(format!("Copy failed: {e:#}")),
@@ -108,12 +117,14 @@ impl OverlayUi {
         let ctx = self.ctx.clone();
         let native = self.doc.bounds().size();
         let scale = native / logical;
+        self.poll_picker();
         self.gesture(&raw.events, logical, active);
         ctx.run(raw, |ctx| {
             let key = |k| ctx.input(|i| i.key_pressed(k));
             if key(egui::Key::Escape) {
                 if self.save_dialog {
                     self.save_dialog = false;
+                    self.error = None;
                 } else if self.text_anchor.is_some() {
                     self.text_anchor = None;
                 } else if self.draft.is_some() {
@@ -133,7 +144,7 @@ impl OverlayUi {
                         if self.explicit_destination {
                             self.save();
                         } else {
-                            self.save_dialog = true;
+                            self.save_request = true;
                         }
                     }
                     if command(egui::Key::Z) {
@@ -146,7 +157,7 @@ impl OverlayUi {
                     if command(egui::Key::Y) {
                         self.doc.redo();
                     }
-                } else {
+                } else if self.text_anchor.is_none() {
                     for (k, t) in [
                         (egui::Key::S, Tool::Crop),
                         (egui::Key::P, Tool::Pen),
@@ -170,6 +181,7 @@ impl OverlayUi {
                     let screen = Rect::from_min_size(Pos2::ZERO, logical);
                     ui.interact(screen, ui.id().with("desktop"), Sense::hover());
                     ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+                    self.paint_desktop(ui.painter(), logical, active);
                     if let Some(crop) = self.visible_crop() {
                         let r = Rect::from_min_max(
                             (crop.min.to_vec2() / scale).to_pos2(),
@@ -218,36 +230,6 @@ impl OverlayUi {
             if active && self.doc.crop.is_some() && self.draft.is_none() {
                 self.toolbar(ctx, logical, scale);
             }
-            if let Some(anchor) = self.text_anchor {
-                let pos = (anchor.to_vec2() / scale).to_pos2();
-                egui::Area::new("caption".into())
-                    .order(egui::Order::Foreground)
-                    .fade_in(false)
-                    .fixed_pos(Pos2::new(
-                        pos.x.min(logical.x - 280.).max(0.),
-                        pos.y.min(logical.y - 80.).max(0.),
-                    ))
-                    .show(ctx, |ui| {
-                        egui::Frame::popup(ui.style())
-                            .inner_margin(8)
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    let edit = ui.add(
-                                        egui::TextEdit::singleline(&mut self.text)
-                                            .desired_width(190.)
-                                            .hint_text("Type text…"),
-                                    );
-                                    if self.text_focus {
-                                        edit.request_focus();
-                                        self.text_focus = false;
-                                    }
-                                    if ui.button("Add").clicked() || key(egui::Key::Enter) {
-                                        self.commit_text();
-                                    }
-                                });
-                            });
-                    });
-            }
             if self.save_dialog {
                 egui::Window::new("Save screenshot")
                     .collapsible(false)
@@ -293,6 +275,23 @@ impl OverlayUi {
         };
         for event in events {
             match event {
+                egui::Event::Text(text) | egui::Event::Paste(text)
+                    if self.text_anchor.is_some() =>
+                {
+                    self.text.push_str(text)
+                }
+                egui::Event::Key {
+                    key: egui::Key::Backspace,
+                    pressed: true,
+                    ..
+                } if self.text_anchor.is_some() => {
+                    self.text.pop();
+                }
+                egui::Event::Key {
+                    key: egui::Key::Enter,
+                    pressed: true,
+                    ..
+                } if self.text_anchor.is_some() => self.commit_text(),
                 egui::Event::PointerButton {
                     pos,
                     button: egui::PointerButton::Primary,
@@ -300,7 +299,7 @@ impl OverlayUi {
                     ..
                 } => {
                     if self.save_dialog
-                        || self.text_anchor.is_some()
+                        || self.picker.is_some()
                         || self
                             .ctx
                             .layer_id_at(*pos)
@@ -308,6 +307,7 @@ impl OverlayUi {
                     {
                         continue;
                     }
+                    self.commit_text();
                     self.claimed = true;
                     let p = pixel(*pos);
                     let crop = self.doc.crop;
@@ -333,7 +333,7 @@ impl OverlayUi {
                     if tool == Tool::Text {
                         self.text_anchor = Some(p);
                         self.text.clear();
-                        self.text_focus = true;
+
                         continue;
                     }
                     if tool == Tool::Pin {
@@ -376,7 +376,7 @@ impl OverlayUi {
                                 .to_vec2()
                                 .clamp(Vec2::ZERO, native - crop.size());
                             mark.points = vec![min.to_pos2(), (min + crop.size()).to_pos2()];
-                        } else if mark.tool == Tool::Pen {
+                        } else if matches!(mark.tool, Tool::Pen | Tool::Highlight) {
                             mark.points.push(p);
                         } else {
                             *mark.points.last_mut().unwrap() = p;
@@ -391,7 +391,7 @@ impl OverlayUi {
                 } => {
                     if let Some(mut mark) = self.draft.take() {
                         if self.moving.is_none() {
-                            if mark.tool == Tool::Pen {
+                            if matches!(mark.tool, Tool::Pen | Tool::Highlight) {
                                 mark.points.push(pixel(*pos));
                             } else {
                                 *mark.points.last_mut().unwrap() = pixel(*pos);
@@ -402,7 +402,8 @@ impl OverlayUi {
                             if self.doc.crop.is_some() {
                                 self.tool = Tool::Pen;
                             }
-                        } else if mark.points.len() > 3
+                        } else if matches!(mark.tool, Tool::Pen | Tool::Highlight)
+                            || mark.points.len() > 3
                             || mark.points[0].distance(*mark.points.last().unwrap()) > 1.
                         {
                             self.doc.add(mark);
@@ -421,34 +422,109 @@ impl OverlayUi {
             .map(Mark::bounds)
             .or(self.doc.crop)
     }
-    pub fn background(&self, active: bool) -> RgbaImage {
-        let mut image = if active {
-            self.doc.rendered(self.draft.as_ref())
-        } else {
-            self.doc.original.clone()
-        };
-        let crop = if active { self.visible_crop() } else { None };
-        let width = image.width() as usize;
-        for (y, row) in image.as_mut().chunks_exact_mut(width * 4).enumerate() {
-            let spans = if let Some(r) =
-                crop.filter(|r| y as f32 >= r.min.y.floor() && (y as f32) < r.max.y.ceil())
-            {
-                [
-                    (0, (r.min.x.floor() as usize).min(width) * 4),
-                    ((r.max.x.ceil() as usize).min(width) * 4, width * 4),
-                ]
-            } else {
-                [(0, width * 4), (0, 0)]
-            };
-            for (start, end) in spans {
-                for p in row[start..end].as_chunks_mut::<4>().0 {
-                    for c in p.iter_mut().take(3) {
-                        *c = (u16::from(*c) * 135 / 255) as u8;
-                    }
+    pub fn fallback_dialog(&self) -> bool {
+        self.save_dialog
+    }
+    pub fn picker_active(&self) -> bool {
+        self.picker.is_some()
+    }
+    pub fn start_picker(&mut self) {
+        if !self.save_request || self.picker.is_some() {
+            return;
+        }
+        self.save_request = false;
+        self.commit_text();
+        let path = PathBuf::from(&self.destination);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.picker = Some(rx);
+        std::thread::spawn(move || {
+            let file = crate::file_picker::save(&path);
+            let _ = tx.send(file);
+        });
+    }
+    pub fn poll_picker(&mut self) {
+        if let Some(rx) = &self.picker {
+            match rx.try_recv() {
+                Ok(Ok(Some(path))) => {
+                    self.picker = None;
+                    self.destination = path.display().to_string();
+                    self.save();
+                }
+                Ok(Ok(None)) => {
+                    self.picker = None;
+                }
+                Ok(Err(_)) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.picker = None;
+                    self.save_dialog = true;
+                    self.error = Some("System file picker unavailable; enter a PNG path.".into());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.ctx
+                        .request_repaint_after(std::time::Duration::from_millis(30));
                 }
             }
         }
-        image
+    }
+    fn paint_desktop(&mut self, painter: &egui::Painter, logical: Vec2, active: bool) {
+        let texture = self.frozen.get_or_insert_with(|| {
+            self.ctx.load_texture(
+                "frozen desktop",
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [
+                        self.doc.original.width() as usize,
+                        self.doc.original.height() as usize,
+                    ],
+                    self.doc.original.as_raw(),
+                ),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        let screen = Rect::from_min_size(Pos2::ZERO, logical);
+        painter.image(
+            texture.id(),
+            screen,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+            Color32::WHITE,
+        );
+        let scale = self.doc.bounds().size() / logical;
+        if active {
+            for mark in self.doc.marks.iter().chain(self.draft.as_ref()) {
+                paint_mark(painter, mark, scale);
+            }
+            if let Some(anchor) = self.text_anchor {
+                paint_mark(
+                    painter,
+                    &Mark {
+                        tool: Tool::Text,
+                        points: vec![anchor],
+                        color: self.color,
+                        width: self.width,
+                        text: format!("{}▏", self.text),
+                    },
+                    scale,
+                );
+            }
+        }
+        let shade = Color32::from_black_alpha(120);
+        if let Some(crop) = self.visible_crop().filter(|_| active) {
+            let r = Rect::from_min_max(
+                (crop.min.to_vec2() / scale).to_pos2(),
+                (crop.max.to_vec2() / scale).to_pos2(),
+            );
+            for area in [
+                Rect::from_min_max(screen.min, Pos2::new(screen.max.x, r.min.y)),
+                Rect::from_min_max(Pos2::new(0., r.max.y), screen.max),
+                Rect::from_min_max(Pos2::new(0., r.min.y), Pos2::new(r.min.x, r.max.y)),
+                Rect::from_min_max(
+                    Pos2::new(r.max.x, r.min.y),
+                    Pos2::new(screen.max.x, r.max.y),
+                ),
+            ] {
+                painter.rect_filled(area, 0, shade);
+            }
+        } else {
+            painter.rect_filled(screen, 0, shade);
+        }
     }
     fn toolbar(&mut self, ctx: &Context, logical: Vec2, scale: Vec2) {
         let crop = self.doc.crop.unwrap();
@@ -488,7 +564,7 @@ impl OverlayUi {
                                     .insert(tool.shortcut().to_lowercase(), response.rect);
                                 if response.clicked() {
                                     self.tool = tool;
-                                    self.text_anchor = None;
+                                    self.commit_text();
                                 }
                                 response.on_hover_text(format!(
                                     "{} ({})",
@@ -498,34 +574,20 @@ impl OverlayUi {
                             }
                             ui.separator();
                             let palette = ui.menu_button(" ", |ui| {
-                                ui.horizontal(|ui| {
-                                    for color in [
-                                        Color32::from_rgb(255, 91, 96),
-                                        Color32::from_rgb(255, 200, 75),
-                                        Color32::from_rgb(86, 213, 143),
-                                        ACCENT,
-                                        Color32::WHITE,
-                                        Color32::BLACK,
-                                    ] {
-                                        let response = ui
-                                            .add(egui::Button::new(" ").min_size(Vec2::splat(24.)));
-                                        ui.painter().circle_filled(
-                                            response.rect.center(),
-                                            6.,
-                                            color,
-                                        );
-                                        if response.clicked() {
-                                            self.color = color;
-                                            ui.close();
-                                        }
-                                    }
-                                });
+                                ui.spacing_mut().slider_width = 220.;
+                                egui::color_picker::color_picker_color32(
+                                    ui,
+                                    &mut self.color,
+                                    egui::color_picker::Alpha::OnlyBlend,
+                                );
+                                self.hits.insert("color-picker".into(), ui.min_rect());
                                 ui.add(
                                     egui::Slider::new(&mut self.width, 2.0..=16.0)
                                         .text("Stroke")
                                         .integer(),
                                 );
                             });
+                            self.hits.insert("color".into(), palette.response.rect);
                             ui.painter().circle_filled(
                                 palette.response.rect.center(),
                                 5.,
@@ -549,7 +611,7 @@ impl OverlayUi {
                                             if self.explicit_destination {
                                                 self.save();
                                             } else {
-                                                self.save_dialog = true;
+                                                self.save_request = true;
                                             }
                                         }
                                         "close" => self.done = true,
@@ -741,9 +803,168 @@ fn action_button(ui: &mut egui::Ui, name: &str, enabled: bool) -> egui::Response
     response
 }
 
+fn annotation_font(size: f32) -> FontId {
+    use ab_glyph::Font;
+    let font = ab_glyph::FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
+    // egui normalizes font sizes to em units; export uses ab_glyph pixel heights.
+    FontId::proportional(size * font.units_per_em().unwrap() / font.height_unscaled())
+}
+
+fn paint_mark(p: &egui::Painter, mark: &Mark, scale: Vec2) {
+    if mark.points.is_empty() || mark.tool == Tool::Crop {
+        return;
+    }
+    let point = |v: Pos2| (v.to_vec2() / scale).to_pos2();
+    let a = point(mark.points[0]);
+    let b = point(*mark.points.last().unwrap());
+    let rect = Rect::from_two_pos(a, b);
+    let color = if mark.tool == Tool::Highlight {
+        highlight_color(mark.color)
+    } else {
+        mark.color
+    };
+    let width = mark.width * if mark.tool == Tool::Highlight { 6. } else { 1. } / scale.x;
+    let stroke = Stroke::new(width, color);
+    match mark.tool {
+        Tool::Pen | Tool::Highlight => {
+            let points: Vec<_> = mark.points.iter().copied().map(point).collect();
+            // One continuous mesh avoids dark overlaps along translucent highlighter strokes.
+            if points.iter().all(|v| v.distance(a) < 0.01) {
+                p.circle_filled(a, width / 2., color);
+            } else {
+                p.add(egui::Shape::line(points, stroke));
+            }
+        }
+        Tool::Arrow => {
+            p.line_segment([a, b], stroke);
+            let delta = b - a;
+            if delta.length() > 0. {
+                let unit = delta.normalized();
+                let wing = egui::vec2(-unit.y, unit.x);
+                let length = ((mark.width * 4. + 10.) / scale.x).min(delta.length() * 0.5);
+                p.add(egui::Shape::line(
+                    vec![
+                        b - unit * length + wing * length * 0.5,
+                        b,
+                        b - unit * length - wing * length * 0.5,
+                    ],
+                    stroke,
+                ));
+            }
+        }
+        Tool::Rectangle => {
+            p.rect_stroke(rect, 0, stroke, StrokeKind::Middle);
+        }
+        Tool::Ellipse => {
+            p.add(egui::epaint::EllipseShape::stroke(
+                rect.center(),
+                rect.size() / 2.,
+                stroke,
+            ));
+        }
+        Tool::Redact => {
+            p.rect_filled(rect, 0, Color32::from_rgb(12, 16, 22));
+        }
+        Tool::Text => {
+            p.text(
+                a,
+                Align2::LEFT_TOP,
+                &mark.text,
+                annotation_font((mark.width * 3. + 16.) / scale.x),
+                color,
+            );
+        }
+        Tool::Pin => {
+            p.circle_filled(a, (mark.width * 2.5 + 10.) / scale.x, color);
+            p.text(
+                a,
+                Align2::CENTER_CENTER,
+                &mark.text,
+                annotation_font(24. / scale.x),
+                Color32::from_rgb(16, 25, 25),
+            );
+        }
+        Tool::Crop => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dragging_reuses_the_frozen_gpu_texture() {
+        let mut ui = OverlayUi::new(RgbaImage::new(1440, 900), PathBuf::from("unused"), true);
+        let first = ui.frame(egui::RawInput::default(), Vec2::new(1440., 900.), true);
+        let frozen = first
+            .textures_delta
+            .set
+            .iter()
+            .find(|(_, delta)| delta.image.size() == [1440, 900])
+            .unwrap()
+            .0;
+        for x in [400., 600., 800.] {
+            let pos = egui::pos2(x, 400.);
+            let events = if x == 400. {
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                }]
+            } else {
+                vec![egui::Event::PointerMoved(pos)]
+            };
+            let output = ui.frame(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                Vec2::new(1440., 900.),
+                true,
+            );
+            assert!(
+                output
+                    .textures_delta
+                    .set
+                    .iter()
+                    .all(|(id, _)| *id != frozen),
+                "Dragging must never re-upload the screenshot"
+            );
+        }
+    }
+    #[test]
+    fn a_stationary_batched_pen_click_is_kept() {
+        let mut ui = OverlayUi::new(
+            RgbaImage::from_pixel(1440, 900, image::Rgba([255; 4])),
+            PathBuf::from("unused"),
+            true,
+        );
+        ui.doc.set_crop(Rect::from_min_max(
+            egui::pos2(300., 200.),
+            egui::pos2(1000., 600.),
+        ));
+        ui.tool = Tool::Pen;
+        let pos = egui::pos2(500., 350.);
+        let events = [true, false]
+            .into_iter()
+            .map(|pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            })
+            .collect();
+        ui.frame(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            Vec2::new(1440., 900.),
+            true,
+        );
+        assert_eq!(ui.doc.marks.len(), 1);
+        assert_ne!(ui.doc.export().get_pixel(200, 150).0, [255; 4]);
+    }
     #[test]
     fn toolbar_becomes_visible_and_accepts_a_batched_click() {
         let mut ui = OverlayUi::new(RgbaImage::new(1440, 900), PathBuf::from("unused"), true);
@@ -755,25 +976,12 @@ mod tests {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440., 900.))),
             ..Default::default()
         };
-        let mut raster = crate::raster::Raster::default();
-        let first = ui.frame(raw(), Vec2::new(1440., 900.), true);
-        for (id, delta) in &first.textures_delta.set {
-            raster.update(*id, delta);
-        }
+        ui.frame(raw(), Vec2::new(1440., 900.), true);
         let second = ui.frame(raw(), Vec2::new(1440., 900.), true);
-        for (id, delta) in &second.textures_delta.set {
-            raster.update(*id, delta);
-        }
-        let mut image = ui.background(true);
-        let primitives = ui.ctx.tessellate(second.shapes, second.pixels_per_point);
-        raster.draw(&mut image, &primitives, second.pixels_per_point);
-        let position = ui.hits["save"].center();
-        assert_ne!(
-            image
-                .get_pixel(position.x as u32 - 7, position.y as u32 - 7)
-                .0,
-            [0, 0, 0, 0],
-            "Toolbar must be painted"
+        assert!(
+            !ui.ctx
+                .tessellate(second.shapes, second.pixels_per_point)
+                .is_empty()
         );
         assert!(ui.toolbar_visible);
         let pos = ui.hits["a"].center();
