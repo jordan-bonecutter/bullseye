@@ -5,6 +5,7 @@ mod document;
 mod file_picker;
 mod fonts;
 mod gpu;
+mod icons;
 mod keyboard;
 mod overlay;
 mod startup;

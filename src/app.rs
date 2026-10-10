@@ -851,91 +851,31 @@ fn tool_button(ui: &mut egui::Ui, tool: Tool, selected: bool) -> egui::Response 
     if response.hovered() || selected {
         ui.painter().rect_filled(
             r,
-            3,
+            5,
             if selected {
-                Color32::from_gray(65)
+                ACCENT.gamma_multiply(0.18)
             } else {
                 Color32::from_gray(48)
             },
         );
     }
-    let c = r.center();
-    let s = Stroke::new(1.5_f32, INK);
-    let boxr = Rect::from_center_size(c, Vec2::new(16., 13.));
-    match tool {
-        Tool::Crop => {
-            ui.painter().line(
-                vec![
-                    c + Vec2::new(-7., -10.),
-                    c + Vec2::new(-7., 7.),
-                    c + Vec2::new(10., 7.),
-                ],
-                s,
-            );
-            ui.painter().line(
-                vec![
-                    c + Vec2::new(-10., -7.),
-                    c + Vec2::new(7., -7.),
-                    c + Vec2::new(7., 10.),
-                ],
-                s,
-            );
-        }
-        Tool::Pen => {
-            ui.painter().line(
-                vec![
-                    c + Vec2::new(-7., 7.),
-                    c + Vec2::new(-5., 1.),
-                    c + Vec2::new(5., -9.),
-                    c + Vec2::new(9., -5.),
-                    c + Vec2::new(-1., 5.),
-                    c + Vec2::new(-7., 7.),
-                ],
-                s,
-            );
-        }
-        Tool::Arrow => {
-            ui.painter()
-                .arrow(boxr.left_bottom(), boxr.right_top() - boxr.left_bottom(), s);
-        }
-        Tool::Rectangle => {
-            ui.painter().rect_stroke(boxr, 0, s, StrokeKind::Inside);
-        }
-        Tool::Ellipse => {
-            ui.painter()
-                .add(egui::Shape::ellipse_stroke(c, Vec2::new(8., 6.5), s));
-        }
-        Tool::Highlight => {
-            ui.painter().line_segment(
-                [c + Vec2::new(-5., 5.), c + Vec2::new(5., -5.)],
-                Stroke::new(5.0_f32, INK),
-            );
-            ui.painter()
-                .line_segment([c + Vec2::new(-8., 9.), c + Vec2::new(8., 9.)], s);
-        }
-        Tool::Redact => {
-            ui.painter().rect_filled(boxr, 1, INK);
-        }
-        Tool::Text => {
-            ui.painter().text(
-                c,
-                Align2::CENTER_CENTER,
-                "T",
-                FontId::proportional(20.),
-                INK,
-            );
-        }
-        Tool::Pin => {
-            ui.painter().circle_stroke(c, 8., s);
-            ui.painter().text(
-                c,
-                Align2::CENTER_CENTER,
-                "1",
-                FontId::proportional(12.),
-                INK,
-            );
-        }
-    }
+    let icon = match tool {
+        Tool::Crop => crate::icons::Icon::Crop,
+        Tool::Pen => crate::icons::Icon::Pencil,
+        Tool::Arrow => crate::icons::Icon::Arrow,
+        Tool::Rectangle => crate::icons::Icon::Rectangle,
+        Tool::Ellipse => crate::icons::Icon::Ellipse,
+        Tool::Highlight => crate::icons::Icon::Highlighter,
+        Tool::Redact => crate::icons::Icon::Redact,
+        Tool::Text => crate::icons::Icon::Text,
+        Tool::Pin => crate::icons::Icon::Pin,
+    };
+    crate::icons::paint(
+        ui.painter(),
+        r.center(),
+        icon,
+        if selected { ACCENT } else { INK },
+    );
     response
 }
 fn action_button(ui: &mut egui::Ui, name: &str, enabled: bool) -> egui::Response {
@@ -948,73 +888,26 @@ fn action_button(ui: &mut egui::Ui, name: &str, enabled: bool) -> egui::Response
         },
     );
     if response.hovered() && enabled {
-        ui.painter().rect_filled(r, 3, Color32::from_gray(48));
+        ui.painter().rect_filled(r, 5, Color32::from_gray(48));
     }
-    let c = r.center();
-    let s = Stroke::new(1.5_f32, if enabled { INK } else { Color32::from_gray(85) });
-    match name {
-        "copy" => {
-            ui.painter().rect_stroke(
-                Rect::from_center_size(c + Vec2::new(2., 2.), Vec2::splat(12.)),
-                1,
-                s,
-                StrokeKind::Inside,
-            );
-            ui.painter().line(
-                vec![
-                    c + Vec2::new(-1., -9.),
-                    c + Vec2::new(-9., -9.),
-                    c + Vec2::new(-9., 1.),
-                ],
-                s,
-            );
-        }
-        "save" => {
-            ui.painter()
-                .arrow(c + Vec2::new(0., -9.), Vec2::new(0., 12.), s);
-            ui.painter().line(
-                vec![
-                    c + Vec2::new(-8., 3.),
-                    c + Vec2::new(-8., 8.),
-                    c + Vec2::new(8., 8.),
-                    c + Vec2::new(8., 3.),
-                ],
-                s,
-            );
-        }
-        "close" => {
-            ui.painter()
-                .line_segment([c - Vec2::splat(6.), c + Vec2::splat(6.)], s);
-            ui.painter()
-                .line_segment([c + Vec2::new(-6., 6.), c + Vec2::new(6., -6.)], s);
-        }
-        _ => {
-            let sign = if name == "redo" { -1. } else { 1. };
-            ui.painter().line(
-                [
-                    (-7., -2.),
-                    (-3., -6.),
-                    (4., -6.),
-                    (8., -2.),
-                    (8., 4.),
-                    (4., 7.),
-                    (-2., 7.),
-                ]
-                .into_iter()
-                .map(|(x, y)| c + Vec2::new(x * sign, y))
-                .collect(),
-                s,
-            );
-            ui.painter().line(
-                vec![
-                    c + Vec2::new(-7. * sign, -7.),
-                    c + Vec2::new(-7. * sign, -2.),
-                    c + Vec2::new(-2. * sign, -2.),
-                ],
-                s,
-            );
-        }
-    }
+    let icon = match name {
+        "undo" => crate::icons::Icon::Undo,
+        "redo" => crate::icons::Icon::Redo,
+        "copy" => crate::icons::Icon::Copy,
+        "save" => crate::icons::Icon::Save,
+        "close" => crate::icons::Icon::Close,
+        _ => unreachable!("unknown toolbar action"),
+    };
+    crate::icons::paint(
+        ui.painter(),
+        r.center(),
+        icon,
+        if enabled {
+            INK
+        } else {
+            Color32::from_gray(100)
+        },
+    );
     response
 }
 

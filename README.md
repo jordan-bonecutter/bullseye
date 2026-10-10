@@ -163,4 +163,8 @@ Text uses the selected font without complex-script shaping, IME composition,
 or dead-key composition. Blur/pixelation and selecting a window automatically are future
 work. Desktop capture supports the common 8-bit RGB shared-memory formats.
 
+Toolbar icons are native vector adaptations of [Lucide](https://lucide.dev), with
+custom redaction and numbered-pin symbols. The upstream license is in
+`assets/icons/LICENSE`. Icons stay crisp at each display scale and require no runtime downloads.
+
 MIT licensed. Fonts are supplied by `epaint_default_fonts` under their upstream licenses.
