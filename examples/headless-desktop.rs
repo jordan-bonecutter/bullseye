@@ -2,6 +2,9 @@
 #[allow(dead_code)]
 #[path = "../src/document.rs"]
 mod document;
+#[allow(dead_code)]
+#[path = "../src/fonts.rs"]
+mod fonts;
 use anyhow::{Context, Result, bail};
 use std::{
     fs::File,

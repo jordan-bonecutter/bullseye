@@ -3,6 +3,7 @@ mod capture;
 mod clipboard;
 mod document;
 mod file_picker;
+mod fonts;
 mod gpu;
 mod keyboard;
 mod overlay;

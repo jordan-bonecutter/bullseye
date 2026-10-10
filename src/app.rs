@@ -1,5 +1,6 @@
 //! A selection and a small toolbar, drawn directly over the frozen desktop.
 use crate::document::{Document, Mark, Tool, highlight_color};
+use crate::fonts::{Catalog, TextFont};
 use egui::{Align2, Color32, Context, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use image::RgbaImage;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -18,6 +19,9 @@ pub struct OverlayUi {
     tool: Tool,
     color: Color32,
     width: f32,
+    font: TextFont,
+    font_search: String,
+    font_definitions: egui::FontDefinitions,
     draft: Option<Mark>,
     moving: Option<(Rect, Pos2)>,
     text_anchor: Option<Pos2>,
@@ -33,6 +37,9 @@ pub struct OverlayUi {
 impl OverlayUi {
     pub fn new(image: RgbaImage, destination: PathBuf, explicit_destination: bool) -> Self {
         let ctx = Context::default();
+        let font = TextFont::default();
+        let mut font_definitions = egui::FontDefinitions::default();
+        font.install(&ctx, &mut font_definitions);
         let mut visuals = egui::Visuals::dark();
         visuals.window_fill = BAR;
         visuals.panel_fill = Color32::TRANSPARENT;
@@ -55,6 +62,9 @@ impl OverlayUi {
             tool: Tool::Crop,
             color: Color32::from_rgb(255, 91, 96),
             width: 4.,
+            font,
+            font_search: String::new(),
+            font_definitions,
             draft: None,
             moving: None,
             text_anchor: None,
@@ -70,6 +80,9 @@ impl OverlayUi {
     }
     pub fn pending_text(&self) -> Option<&str> {
         self.text_anchor.map(|_| self.text.as_str())
+    }
+    pub fn selected_font(&self) -> &str {
+        &self.font.name
     }
     pub fn color(&self) -> [u8; 4] {
         self.color.to_srgba_unmultiplied()
@@ -107,6 +120,7 @@ impl OverlayUi {
                 color: self.color,
                 width: self.width,
                 text: self.text.clone(),
+                font: self.font.clone(),
             });
         }
     }
@@ -122,7 +136,9 @@ impl OverlayUi {
         ctx.run(raw, |ctx| {
             let key = |k| ctx.input(|i| i.key_pressed(k));
             if key(egui::Key::Escape) {
-                if self.save_dialog {
+                if egui::Popup::is_any_open(ctx) {
+                    egui::Popup::close_all(ctx);
+                } else if self.save_dialog {
                     self.save_dialog = false;
                     self.error = None;
                 } else if self.text_anchor.is_some() {
@@ -273,10 +289,12 @@ impl OverlayUi {
                 (p.y * scale.y).clamp(0., native.y),
             )
         };
+        let caption_input =
+            !self.ctx.wants_keyboard_input() && !egui::Popup::is_any_open(&self.ctx);
         for event in events {
             match event {
                 egui::Event::Text(text) | egui::Event::Paste(text)
-                    if self.text_anchor.is_some() =>
+                    if self.text_anchor.is_some() && caption_input =>
                 {
                     self.text.push_str(text)
                 }
@@ -284,14 +302,14 @@ impl OverlayUi {
                     key: egui::Key::Backspace,
                     pressed: true,
                     ..
-                } if self.text_anchor.is_some() => {
+                } if self.text_anchor.is_some() && caption_input => {
                     self.text.pop();
                 }
                 egui::Event::Key {
                     key: egui::Key::Enter,
                     pressed: true,
                     ..
-                } if self.text_anchor.is_some() => self.commit_text(),
+                } if self.text_anchor.is_some() && caption_input => self.commit_text(),
                 egui::Event::PointerButton {
                     pos,
                     button: egui::PointerButton::Primary,
@@ -339,6 +357,7 @@ impl OverlayUi {
                     if tool == Tool::Pin {
                         self.doc.add(Mark {
                             tool,
+                            font: self.font.clone(),
                             points: vec![p],
                             color: self.color,
                             width: self.width,
@@ -362,6 +381,7 @@ impl OverlayUi {
                     }
                     self.draft = Some(Mark {
                         tool,
+                        font: self.font.clone(),
                         points: vec![corner.map(|(_, opposite)| opposite).unwrap_or(p), p],
                         color: self.color,
                         width: self.width,
@@ -493,7 +513,7 @@ impl OverlayUi {
             }
             if let Some(anchor) = self.text_anchor {
                 let position = (anchor.to_vec2() / scale).to_pos2();
-                let font = annotation_font((self.width * 3. + 16.) / scale.x);
+                let font = self.font.font_id((self.width * 3. + 16.) / scale.x);
                 let galley = painter.layout_no_wrap(self.text.clone(), font, self.color);
                 let caret = galley
                     .pos_from_cursor(egui::text::CCursor::new(self.text.chars().count()))
@@ -527,13 +547,59 @@ impl OverlayUi {
             painter.rect_filled(screen, 0, shade);
         }
     }
+    fn font_selector(&mut self, ui: &mut egui::Ui) {
+        let button = ui.add_sized(
+            Vec2::new(130., 29.),
+            egui::Button::new(&self.font.name).truncate(),
+        );
+        self.hits.insert("font".into(), button.rect);
+        egui::Popup::menu(&button)
+            .width(240.)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut self.font_search).hint_text("Find a font…"),
+                );
+                self.hits.insert("font-search".into(), search.rect);
+                egui::ScrollArea::vertical()
+                    .max_height(220.)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        let catalog = Catalog::system();
+                        let search = self.font_search.to_lowercase();
+                        for choice in &catalog.choices {
+                            if !choice.name.to_lowercase().contains(&search) {
+                                continue;
+                            }
+                            let response =
+                                ui.selectable_label(self.font.key == choice.key, &choice.name);
+                            if ui.is_rect_visible(response.rect) {
+                                self.hits
+                                    .insert(format!("font-{}", choice.key), response.rect);
+                            }
+                            if response.clicked() {
+                                if let Some(font) = catalog.load(choice) {
+                                    font.install(&self.ctx, &mut self.font_definitions);
+                                    self.font = font;
+                                    self.font_search.clear();
+                                    self.ctx.request_repaint();
+                                    ui.close();
+                                } else {
+                                    self.error =
+                                        Some("This font cannot be loaded for annotations.".into());
+                                }
+                            }
+                        }
+                    });
+            });
+    }
     fn toolbar(&mut self, ctx: &Context, logical: Vec2, scale: Vec2) {
         let crop = self.doc.crop.unwrap();
         let r = Rect::from_min_max(
             (crop.min.to_vec2() / scale).to_pos2(),
             (crop.max.to_vec2() / scale).to_pos2(),
         );
-        let width: f32 = 500.;
+        let width: f32 = if self.tool == Tool::Text { 640. } else { 500. };
         let x = r.center().x.clamp(
             (width / 2.).min(logical.x / 2.),
             (logical.x - width / 2.).max(logical.x / 2.),
@@ -572,6 +638,9 @@ impl OverlayUi {
                                     tool.label(),
                                     tool.shortcut()
                                 ));
+                            }
+                            if self.tool == Tool::Text {
+                                self.font_selector(ui);
                             }
                             ui.separator();
                             let palette = ui.menu_button(" ", |ui| {
@@ -805,10 +874,7 @@ fn action_button(ui: &mut egui::Ui, name: &str, enabled: bool) -> egui::Response
 }
 
 fn annotation_font(size: f32) -> FontId {
-    use ab_glyph::Font;
-    let font = ab_glyph::FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
-    // egui normalizes font sizes to em units; export uses ab_glyph pixel heights.
-    FontId::proportional(size * font.units_per_em().unwrap() / font.height_unscaled())
+    TextFont::default().font_id(size)
 }
 
 fn paint_mark(p: &egui::Painter, mark: &Mark, scale: Vec2) {
@@ -871,7 +937,7 @@ fn paint_mark(p: &egui::Painter, mark: &Mark, scale: Vec2) {
                 a,
                 Align2::LEFT_TOP,
                 &mark.text,
-                annotation_font((mark.width * 3. + 16.) / scale.x),
+                mark.font.font_id((mark.width * 3. + 16.) / scale.x),
                 color,
             );
         }

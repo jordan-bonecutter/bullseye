@@ -38,7 +38,7 @@ def wait_for(check, message, timeout=20):
 with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as temp:
     runtime = Path(temp)
     config = runtime / 'sway.conf'
-    config.write_text('output HEADLESS-1 mode 1440x900\nxwayland disable\nseat seat0 fallback true\ndefault_border none\n')
+    config.write_text('output HEADLESS-1 mode 1440x900\nxwayland disable\nseat seat0 fallback true\ninput * repeat_delay 150\ninput * repeat_rate 20\ndefault_border none\n')
     env = os.environ.copy()
     for key in ('WAYLAND_DISPLAY', 'DISPLAY', 'SWAYSOCK', 'WAYLAND_SOCKET', 'DBUS_SESSION_BUS_ADDRESS'):
         env.pop(key, None)
@@ -172,6 +172,70 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             export_bounds=ImageChops.difference(text_export.crop((150,150,250,190)),crop_base).getbbox()
             assert all(abs(a-b)<=2 for a,b in zip(preview_bounds,export_bounds)),(preview_bounds,export_bounds)
             print('PASS text placement, compositor keymap, and Ctrl+C', flush=True)
+
+            # A held key must repeat at the compositor's rate, then stop on release.
+            overlay,state=launch('repeat',('--demo',))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No repeat toolbar')
+            click(*selected['buttons']['t'])
+            click(450,350)
+            input_actions('keydown 35\nwait 500\nkeyup 35\nwait 100\n')
+            repeated=wait_for(lambda:state()['text'] if state().get('text') and len(state()['text'])>=4 else None,'Held key did not repeat')
+            assert set(repeated)=={'h'},repeated
+            input_actions('wait 350\n')
+            assert state()['text']==repeated,'Text continued repeating after key release'
+            input_actions('keydown 14\nwait 300\nkeyup 14\nwait 100\n')
+            deleted=state()['text']
+            assert len(deleted)<=len(repeated)-3,'Backspace did not repeat'
+            input_actions('wait 250\n')
+            assert state()['text']==deleted,'Backspace continued after release'
+            input_actions('key 1\nkey 1\nwait 100\n')
+            assert overlay.wait(timeout=10)==0
+            print('PASS compositor key repeat for typing and Backspace, stopping on release',flush=True)
+
+            # Select bundled and installed fonts, without changing an earlier caption's font.
+            font_path=ARTIFACTS/'font-export.png'
+            overlay,state=launch('fonts',('--demo','--save-to',str(font_path)))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No font toolbar')
+            click(*selected['buttons']['t'])
+            selected=wait_for(lambda:state() if 'font' in state()['buttons'] else None,'Font selector missing')
+            click(*selected['buttons']['font'])
+            selected=wait_for(lambda:state() if 'font-Hack' in state()['buttons'] else None,'Bundled monospace font missing')
+            snapshot('font-picker.png')
+            click(*selected['buttons']['font-Hack'])
+            wait_for(lambda:state() if state().get('font')=='Hack' else None,'Font did not switch to Hack')
+            click(450,350)
+            input_actions('type iiiwww\nkey 28\nwait 100\n')
+            selected=wait_for(lambda:state() if state()['marks']==1 else None,'Monospace caption missing')
+            mono_preview=snapshot('font-monospace.png')
+            click(450,450)
+            input_actions('type iiiwww\nwait 100\n')
+            selected=state()
+            click(*selected['buttons']['font'])
+            selected=wait_for(lambda:state() if 'font-search' in state()['buttons'] else None,'Font search missing')
+            click(*selected['buttons']['font-search'])
+            input_actions('type hack\nwait 150\n')
+            selected=wait_for(lambda:state() if 'font-Hack' in state()['buttons'] else None,'Font search did not find Hack')
+            assert selected['text']=='iiiwww','Font search edited the pending caption'
+            click(*selected['buttons']['font-Hack'])
+            selected=state()
+            click(*selected['buttons']['font'])
+            selected=wait_for(lambda:state() if any(k.startswith('font-system-') for k in state()['buttons']) else None,'Installed fonts missing from selector')
+            installed=next(k for k in selected['buttons'] if k.startswith('font-system-'))
+            click(*selected['buttons'][installed])
+            selected=wait_for(lambda:state() if state().get('font') not in ('Hack','Ubuntu Light') else None,'Installed font did not load')
+            input_actions('key 28\nwait 100\n')
+            selected=wait_for(lambda:state() if state()['marks']==2 else None,'System font caption missing')
+            system_preview=snapshot('font-system.png')
+            assert ImageChops.difference(mono_preview.crop((450,350,650,390)),system_preview.crop((450,350,650,390))).getbbox() is None,'Changing font altered an earlier caption'
+            click(*selected['buttons']['save'])
+            assert overlay.wait(timeout=15)==0
+            fonts=Image.open(font_path).convert('RGB')
+            mono=ImageChops.difference(fonts.crop((150,150,350,190)),base.crop((450,350,650,390)))
+            system=ImageChops.difference(fonts.crop((150,250,350,290)),base.crop((450,450,650,490)))
+            assert mono.getbbox() and system.getbbox() and mono.tobytes()!=system.tobytes(),'Font selection did not affect PNG export'
+            print('PASS bundled and installed font selection, per-caption retention, and PNG export',flush=True)
 
             # Stationary pen clicks must produce pixels, even without pointer motion.
             dots_path=ARTIFACTS/'dots-export.png'

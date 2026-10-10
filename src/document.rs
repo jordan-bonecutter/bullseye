@@ -1,4 +1,5 @@
-use ab_glyph::{Font, FontRef, ScaleFont};
+use crate::fonts::TextFont;
+use ab_glyph::{Font, ScaleFont};
 use egui::{Color32, Pos2, Rect};
 use image::{Rgba, RgbaImage};
 use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
@@ -61,6 +62,7 @@ pub struct Mark {
     pub color: Color32,
     pub width: f32,
     pub text: String,
+    pub font: TextFont,
 }
 impl Mark {
     pub fn bounds(&self) -> Rect {
@@ -202,7 +204,14 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
                 Color32::from_rgb(16, 25, 25),
             );
         } else {
-            draw_text(image, &mark.text, a, mark.width * 3.0 + 16.0, mark.color);
+            draw_text_with_font(
+                image,
+                &mark.text,
+                a,
+                mark.width * 3.0 + 16.0,
+                mark.color,
+                &mark.font,
+            );
         }
         return;
     }
@@ -343,8 +352,18 @@ fn blend(image: &mut RgbaImage, x: u32, y: u32, rgba: [u8; 4]) {
     pixel.0[3] = 255;
 }
 pub fn draw_text(image: &mut RgbaImage, text: &str, pos: Pos2, size: f32, color: Color32) {
+    draw_text_with_font(image, text, pos, size, color, &TextFont::default());
+}
+fn draw_text_with_font(
+    image: &mut RgbaImage,
+    text: &str,
+    pos: Pos2,
+    size: f32,
+    color: Color32,
+    font: &TextFont,
+) {
     let [red, green, blue, alpha] = color.to_srgba_unmultiplied();
-    let font = FontRef::try_from_slice(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
+    let font = font.face();
     let scaled = font.as_scaled(size);
     let mut cursor = ab_glyph::point(pos.x, pos.y + scaled.ascent());
     let mut previous = None;
@@ -476,6 +495,7 @@ mod tests {
             points: vec![Pos2::new(15., 15.), Pos2::new(25., 25.)],
             color: Color32::RED,
             width: 3.,
+            font: TextFont::default(),
             text: String::new(),
         });
         assert_eq!(d.export().get_pixel(7, 7).0, [12, 16, 22, 255]);
@@ -499,6 +519,7 @@ mod tests {
             points: vec![Pos2::new(10.8, 11.2), Pos2::new(20.1, 21.9)],
             color: Color32::RED,
             width: 3.0,
+            font: TextFont::default(),
             text: String::new(),
         });
         let image = d.export();
@@ -515,6 +536,7 @@ mod tests {
                 points: vec![Pos2::new(50., 50.); 3],
                 color: Color32::from_rgba_unmultiplied(255, 0, 0, alpha),
                 width: 4.,
+                font: TextFont::default(),
                 text: String::new(),
             });
             let image = d.export();
@@ -532,6 +554,7 @@ mod tests {
                 points: vec![Pos2::new(5., 5.), Pos2::new(80., 65.)],
                 color: Color32::RED,
                 width: 3.,
+                font: TextFont::default(),
                 text: "Hi".into(),
             });
         }

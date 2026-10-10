@@ -82,6 +82,10 @@ impl Keyboard {
             }
         }
     }
+    pub fn repeats(&self, key: u32) -> bool {
+        // SAFETY: the keymap remains live for this keyboard object's lifetime.
+        unsafe { (self.api.xkb_keymap_key_repeats)(self.keymap, key + 8) != 0 }
+    }
     pub fn events(&self, key: u32, pressed: bool, modifiers: Modifiers) -> Vec<Event> {
         let mut events = Vec::new();
         // SAFETY: the live xkb state receives a valid Wayland keycode plus the XKB offset.
@@ -135,5 +139,87 @@ impl Drop for Keyboard {
             (self.api.xkb_keymap_unref)(self.keymap);
             (self.api.xkb_context_unref)(self.context);
         }
+    }
+}
+
+/// Wayland sends key transitions; clients synthesize repeat using RepeatInfo timings.
+pub struct KeyRepeat {
+    interval: Option<std::time::Duration>,
+    delay: std::time::Duration,
+    held: Option<(u32, usize, std::time::Instant)>,
+}
+impl Default for KeyRepeat {
+    fn default() -> Self {
+        Self {
+            interval: Some(std::time::Duration::from_millis(40)),
+            delay: std::time::Duration::from_millis(600),
+            held: None,
+        }
+    }
+}
+impl KeyRepeat {
+    pub fn configure(&mut self, rate: i32, delay: i32) {
+        self.interval =
+            (rate > 0).then(|| std::time::Duration::from_secs_f64(1. / f64::from(rate)));
+        self.delay = std::time::Duration::from_millis(delay.max(0) as u64);
+        self.cancel();
+    }
+    pub fn press(&mut self, key: u32, view: usize, repeatable: bool, now: std::time::Instant) {
+        if repeatable && self.interval.is_some() {
+            self.held = Some((key, view, now + self.delay));
+        }
+    }
+    pub fn release(&mut self, key: u32) {
+        if self.held.is_some_and(|held| held.0 == key) {
+            self.cancel();
+        }
+    }
+    pub fn cancel(&mut self) {
+        self.held = None;
+    }
+    pub fn deadline(&self) -> Option<std::time::Instant> {
+        self.held.map(|held| held.2)
+    }
+    pub fn due(&mut self, now: std::time::Instant) -> Option<(u32, usize)> {
+        let (key, view, next) = self.held?;
+        if now < next {
+            return None;
+        }
+        // Coalesce missed ticks instead of flooding the UI after a slow frame.
+        self.held = Some((key, view, now + self.interval?));
+        Some((key, view))
+    }
+}
+
+#[cfg(test)]
+mod repeat_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[test]
+    fn compositor_delay_rate_and_matching_release_are_respected() {
+        let mut repeat = KeyRepeat::default();
+        repeat.configure(20, 150);
+        let now = Instant::now();
+        repeat.press(35, 0, true, now);
+        assert_eq!(repeat.due(now + Duration::from_millis(149)), None);
+        assert_eq!(repeat.due(now + Duration::from_millis(150)), Some((35, 0)));
+        repeat.press(42, 0, false, now); // Shift changes the current key without replacing it.
+        repeat.release(42);
+        assert_eq!(repeat.due(now + Duration::from_millis(199)), None);
+        assert_eq!(repeat.due(now + Duration::from_millis(200)), Some((35, 0)));
+        repeat.release(35);
+        assert_eq!(repeat.due(now + Duration::from_secs(1)), None);
+    }
+    #[test]
+    fn disabled_repeat_and_focus_loss_stop_timers() {
+        let mut repeat = KeyRepeat::default();
+        let now = Instant::now();
+        repeat.configure(0, 100);
+        repeat.press(35, 0, true, now);
+        assert_eq!(repeat.deadline(), None);
+        repeat.configure(30, 100);
+        repeat.press(35, 0, true, now);
+        repeat.cancel();
+        assert_eq!(repeat.due(now + Duration::from_secs(1)), None);
     }
 }

@@ -135,6 +135,8 @@ fn main() -> Result<()> {
             ["extent", w, h] => extent = (w.parse()?, h.parse()?),
             ["press"] => pointer.button(time, 0x110, ButtonState::Pressed),
             ["release"] => pointer.button(time, 0x110, ButtonState::Released),
+            ["keydown", value] => keyboard.key(time, value.parse()?, 1),
+            ["keyup", value] => keyboard.key(time, value.parse()?, 0),
             ["key", value] => {
                 let code = value.parse()?;
                 keyboard.key(time, code, 1);

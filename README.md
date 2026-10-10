@@ -39,9 +39,12 @@ driver; headless tests exercise the same rendering path with Mesa llvmpipe.
    The highlighter draws a broad translucent pen stroke. Stationary pen clicks make dots.
    The color button opens a full hue/saturation/value, RGBA, and opacity picker, plus
    the stroke-width control.
-4. For text, click the text tool, then click inside the selection. Type a caption; its
-   preview appears directly on the image. Press Enter, click elsewhere, or export to
-   finish it; Escape discards the pending caption.
+4. For text, click the text tool. Its toolbar shows a searchable font selector with
+   bundled Ubuntu Light/Hack and installed system fonts. Click inside the selection
+   and type a caption; its preview appears directly on the image. Press Enter, click
+   elsewhere, or export to
+   finish it; Escape discards the pending caption. Each caption keeps its chosen font.
+   Held keys repeat using the compositor’s configured delay and rate.
 5. Copy to the Wayland clipboard, or save as PNG. The overlay closes after success.
    Escape or right-click cancels without exporting.
 
@@ -115,7 +118,8 @@ private D-Bus daemon serves test SaveFile responses; the host portal is never co
 Testing never opens a window in your desktop session.
 
 The suite checks the actual crosshair, exact region selection, toolbar actions, drawings,
-inline text previews through a virtual keyboard, stationary dots, bent highlighter
+inline text previews and held-key repeat through a virtual keyboard, bundled/system
+font selection and export, stationary dots, bent highlighter
 strokes, icon antialiasing, full color selection, clipboard persistence, portal saving,
 cancellation, unavailable-portal fallback, and dismissal,
 HiDPI mapping, and multiple displays. A real hover-content fixture changes behind the
@@ -130,7 +134,7 @@ text/toolbar interactions, and reuse of the frozen texture during dragging.
 
 Sway/wlroots is the focus. GNOME/KDE portal capture and ext-image-copy-capture are not
 implemented. Selection cannot span displays; choose a region on one frozen display.
-Text uses the bundled Ubuntu font without complex-script shaping, IME composition,
+Text uses the selected font without complex-script shaping, IME composition,
 or dead-key composition. Blur/pixelation and selecting a window automatically are future
 work. Desktop capture supports the common 8-bit RGB shared-memory formats.
 

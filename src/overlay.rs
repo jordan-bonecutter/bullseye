@@ -1,5 +1,9 @@
 //! Real layer-shell overlays: capture first, then cover each output with its frozen image.
-use crate::{app::OverlayUi, gpu::Gpu, keyboard::Keyboard};
+use crate::{
+    app::OverlayUi,
+    gpu::Gpu,
+    keyboard::{KeyRepeat, Keyboard},
+};
 use anyhow::{Context, Result, bail};
 use egui::{Event, Modifiers, Pos2, Vec2};
 use image::RgbaImage;
@@ -48,6 +52,7 @@ struct State {
     pointer: Option<wl_pointer::WlPointer>,
     keyboard_proxy: Option<wl_keyboard::WlKeyboard>,
     keyboard: Option<Keyboard>,
+    repeat: KeyRepeat,
     modifiers: Modifiers,
     pointer_view: Option<usize>,
     keyboard_view: Option<usize>,
@@ -106,6 +111,7 @@ pub fn run(
         pointer: None,
         keyboard_proxy: None,
         keyboard: None,
+        repeat: KeyRepeat::default(),
         modifiers: Modifiers::default(),
         pointer_view: None,
         keyboard_view: None,
@@ -192,6 +198,7 @@ pub fn run(
     conn.flush()?;
     while !state.exit {
         queue.dispatch_pending(&mut state)?;
+        state.repeat_keys();
         state.render(&conn, &qh)?;
         conn.flush()?;
         if state.exit {
@@ -214,6 +221,7 @@ pub fn run(
                 .views
                 .iter()
                 .filter_map(|v| v.repaint_at)
+                .chain(state.repeat.deadline())
                 .map(|at| at.saturating_duration_since(Instant::now()))
                 .min()
                 .unwrap_or(Duration::from_millis(100))
@@ -287,6 +295,25 @@ fn write_buffer(slot: &mut Slot, image: &RgbaImage) -> Result<()> {
     Ok(())
 }
 impl State {
+    fn repeat_keys(&mut self) {
+        if self.picking || self.keyboard_view.is_none() {
+            self.repeat.cancel();
+            return;
+        }
+        if let Some((key, idx)) = self.repeat.due(Instant::now())
+            && let Some(keyboard) = &self.keyboard
+        {
+            let mut events = keyboard.events(key, true, self.modifiers);
+            for event in &mut events {
+                if let Event::Key { repeat, .. } = event {
+                    *repeat = true;
+                }
+            }
+            for event in events {
+                self.input(idx, event);
+            }
+        }
+    }
     fn render(&mut self, conn: &Connection, qh: &QueueHandle<Self>) -> Result<()> {
         let metadata = std::env::var_os("BULLSEYE_TEST_STATE").map(|_|self.views.iter().map(|v|serde_json::json!({"name":v.name,"logical":[v.width,v.height],"native":[v.ui.doc.original.width(),v.ui.doc.original.height()],"mapped":v.surface.is_some()})).collect::<Vec<_>>());
         for idx in 0..self.views.len() {
@@ -369,7 +396,7 @@ impl State {
                     .map(|(k, r)| (k.clone(), serde_json::json!([r.center().x, r.center().y])))
                     .collect();
                 let (x, y, w, h) = view.ui.doc.crop_pixels();
-                let data = serde_json::json!({"views":metadata,"output":view.name,"phase":if view.ui.doc.crop.is_some(){"annotate"}else{"select"},"buttons":hits,"crop":[x,y,w,h],"marks":view.ui.doc.marks.len(),"logical":[view.width,view.height],"frame":view.ui.ctx.cumulative_frame_nr(),"primitives":primitives.len(),"toolbar_visible":view.ui.toolbar_visible,"text":view.ui.pending_text(),"tool":view.ui.tool(),"color":view.ui.color(),"render_us":frame_started.elapsed().as_micros(),"texture_updates":output.textures_delta.set.len(),"picker":view.ui.picker_active(),"save_dialog":view.ui.fallback_dialog(),"repaint_ms":repaint_delay.as_millis().min(1000000)});
+                let data = serde_json::json!({"views":metadata,"output":view.name,"phase":if view.ui.doc.crop.is_some(){"annotate"}else{"select"},"buttons":hits,"crop":[x,y,w,h],"marks":view.ui.doc.marks.len(),"logical":[view.width,view.height],"frame":view.ui.ctx.cumulative_frame_nr(),"primitives":primitives.len(),"toolbar_visible":view.ui.toolbar_visible,"text":view.ui.pending_text(),"tool":view.ui.tool(),"font":view.ui.selected_font(),"color":view.ui.color(),"render_us":frame_started.elapsed().as_micros(),"texture_updates":output.textures_delta.set.len(),"picker":view.ui.picker_active(),"save_dialog":view.ui.fallback_dialog(),"repaint_ms":repaint_delay.as_millis().min(1000000)});
                 let parent = std::path::Path::new(&path)
                     .parent()
                     .unwrap_or(std::path::Path::new("."));
@@ -404,6 +431,7 @@ impl State {
         let picking = self.views.iter().any(|v| v.ui.picker_active());
         if self.picking != picking {
             self.picking = picking;
+            self.repeat.cancel();
             for v in &self.views {
                 if let Some(layer) = &v.layer {
                     layer.set_layer(if picking {
@@ -602,7 +630,10 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                 fd,
                 size,
             } => match Keyboard::new(fd, size) {
-                Ok(k) => state.keyboard = Some(k),
+                Ok(k) => {
+                    state.repeat.cancel();
+                    state.keyboard = Some(k);
+                }
                 Err(e) => {
                     state.error = Some(e.to_string());
                     state.exit = true;
@@ -614,6 +645,11 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                     .iter()
                     .position(|v| v.surface.as_ref() == Some(&surface))
             }
+            wl_keyboard::Event::Leave { .. } => {
+                state.keyboard_view = None;
+                state.repeat.cancel();
+            }
+            wl_keyboard::Event::RepeatInfo { rate, delay } => state.repeat.configure(rate, delay),
             wl_keyboard::Event::Modifiers {
                 mods_depressed,
                 mods_latched,
@@ -637,6 +673,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for State {
                     .or(state.pointer_view)
                     && let Some(keyboard) = &state.keyboard
                 {
+                    if key_state == wl_keyboard::KeyState::Pressed {
+                        state
+                            .repeat
+                            .press(key, idx, keyboard.repeats(key), Instant::now());
+                    } else {
+                        state.repeat.release(key);
+                    }
                     let events = keyboard.events(
                         key,
                         key_state == wl_keyboard::KeyState::Pressed,
