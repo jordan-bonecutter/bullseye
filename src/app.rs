@@ -492,16 +492,17 @@ impl OverlayUi {
                 paint_mark(painter, mark, scale);
             }
             if let Some(anchor) = self.text_anchor {
-                paint_mark(
-                    painter,
-                    &Mark {
-                        tool: Tool::Text,
-                        points: vec![anchor],
-                        color: self.color,
-                        width: self.width,
-                        text: format!("{}▏", self.text),
-                    },
-                    scale,
+                let position = (anchor.to_vec2() / scale).to_pos2();
+                let font = annotation_font((self.width * 3. + 16.) / scale.x);
+                let galley = painter.layout_no_wrap(self.text.clone(), font, self.color);
+                let caret = galley
+                    .pos_from_cursor(egui::text::CCursor::new(self.text.chars().count()))
+                    .translate(position.to_vec2() + Vec2::new(1., 0.));
+                painter.galley(position, galley, self.color);
+                // Draw the caret as geometry: font fallback must never turn it into a missing glyph.
+                painter.line_segment(
+                    [caret.left_top(), caret.left_bottom()],
+                    Stroke::new(1.0_f32, self.color),
                 );
             }
         }

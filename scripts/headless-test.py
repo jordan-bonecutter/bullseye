@@ -150,7 +150,11 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             click(*selected['buttons']['t'])
             click(450,350)
             wait_for(lambda: state() if state().get('text') is not None else None,'Text field did not appear')
-            input_actions('wait 400\ntype hello\nwait 400\n')
+            input_actions('wait 400\n')
+            caret=snapshot('text-caret.png')
+            caret_bounds=ImageChops.difference(caret.crop((446,348,474,386)),base.crop((446,348,474,386))).getbbox()
+            assert caret_bounds and caret_bounds[2]-caret_bounds[0]<=3 and caret_bounds[3]-caret_bounds[1]>=18, f'Caret is not a thin vertical line: {caret_bounds}'
+            input_actions('type hello\nwait 400\n')
             wait_for(lambda: state() if state().get('text') == 'hello' else None,'Text entry failed')
             preview=snapshot('live-text-preview.png')
             assert ImageChops.difference(preview.crop((450,350,550,390)),base.crop((450,350,550,390))).getbbox(),'Text has no live preview'
