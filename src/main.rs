@@ -2,6 +2,9 @@ mod app;
 mod capture;
 mod clipboard;
 mod document;
+mod keyboard;
+mod overlay;
+mod raster;
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -16,7 +19,6 @@ struct Args {
     open: Option<PathBuf>,
     output: Option<String>,
     cursor: bool,
-    fullscreen: bool,
     delay: u64,
     save: Option<PathBuf>,
     save_to: Option<PathBuf>,
@@ -29,14 +31,14 @@ fn args() -> Result<Option<Args>> {
         match value.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "Bullseye — a good shot, a little polish.\n\nUsage: bullseye [OPTIONS]\n\n  --demo               Try the editor with a sample desktop\n  --open FILE          Annotate an existing PNG/JPEG\n  --output NAME        Capture a Wayland output (e.g. DP-1)\n  --list-outputs       List Wayland output connector names\n  --cursor             Include the pointer in the screenshot\n  --fullscreen         Open the editor fullscreen\n  --delay SECONDS      Wait before capture (0–60)\n  --save FILE          Capture directly to PNG without opening the editor\n  --save-to FILE       Choose the editor’s PNG save location\n  --copy               Copy directly to Wayland clipboard without opening the editor\n  -h, --help           Show this help\n\nWithout options, captures the first advertised output and opens the editor.\nCapture requires wlr-screencopy (Sway/wlroots); portal capture is not yet supported."
+                    "Bullseye — select, annotate, copy or save.\n\nUsage: bullseye [OPTIONS]\n\n  --demo               Try selection with a sample desktop\n  --open FILE          Annotate an existing PNG/JPEG\n  --output NAME        Capture a Wayland output (e.g. DP-1)\n  --list-outputs       List Wayland output connector names\n  --cursor             Include the pointer in the screenshot\n  --delay SECONDS      Wait before capture (0–60)\n  --save FILE          Capture directly to PNG without selection\n  --save-to FILE       Choose the overlay’s PNG save location\n  --copy               Copy directly to Wayland clipboard without selection\n  -h, --help           Show this help\n\nWithout options, freezes the desktop for region selection and annotation.\nCapture requires wlr-screencopy (Sway/wlroots); portal capture is not yet supported."
                 );
                 return Ok(None);
             }
             "--demo" => args.demo = true,
             "--list-outputs" => args.list_outputs = true,
             "--cursor" => args.cursor = true,
-            "--fullscreen" => args.fullscreen = true,
+            "--fullscreen" => {} // compatibility: selection always covers the desktop
             "--copy" => args.copy = true,
             "--open" => {
                 args.open = Some(values.next().context("--open requires a filename")?.into())
@@ -146,48 +148,31 @@ fn run() -> Result<()> {
     if args.save.is_some() || args.copy {
         return Ok(());
     }
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Bullseye — Screenshot editor")
-            .with_app_id("bullseye")
-            .with_inner_size([1280., 820.])
-            .with_min_inner_size([1000., 680.])
-            .with_fullscreen(args.fullscreen),
-        ..Default::default()
-    };
-    let destination = args.save_to.unwrap_or_else(default_path);
-    let recapture = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let request = recapture.clone();
-    eframe::run_native(
-        "Bullseye",
-        options,
-        Box::new(move |cc| {
-            Ok(Box::new(app::Editor::new(
-                cc,
-                image,
-                label,
-                destination,
-                request,
-            )))
-        }),
-    )
-    .map_err(|e| anyhow::anyhow!("Open editor: {e}"))?;
-    if recapture.load(std::sync::atomic::Ordering::Relaxed) {
-        // Drop the old Wayland window before starting a new capture. Minimize is not
-        // implemented consistently on tiling compositors, so it cannot exclude our UI.
-        std::thread::sleep(Duration::from_millis(250));
-        let mut command = std::process::Command::new(std::env::current_exe()?);
-        if let Some(output) = args.output {
-            command.arg("--output").arg(output);
-        }
-        if args.cursor {
-            command.arg("--cursor");
-        }
-        if args.fullscreen {
-            command.arg("--fullscreen");
-        }
-        command.spawn().context("Start a fresh capture")?;
+    if image.width() < 2 || image.height() < 2 {
+        bail!("Interactive selection requires an image of at least 2 × 2 pixels");
     }
+    let explicit_destination = args.save_to.is_some();
+    let destination = args.save_to.unwrap_or_else(default_path);
+    let images = if args.demo || args.open.is_some() || args.output.is_some() {
+        let name = args
+            .output
+            .or_else(|| {
+                capture::list_outputs()
+                    .ok()
+                    .and_then(|names| names.into_iter().next())
+            })
+            .context("No Wayland outputs")?;
+        vec![(image, name)]
+    } else {
+        let mut images = vec![(image, label.clone())];
+        for name in capture::list_outputs()? {
+            if name != label {
+                images.push(capture::screenshot(Some(name), args.cursor)?);
+            }
+        }
+        images
+    };
+    overlay::run(images, destination, explicit_destination)?;
     Ok(())
 }
 fn main() {

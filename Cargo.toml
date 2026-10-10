@@ -9,7 +9,11 @@ license = "MIT"
 anyhow = "1"
 ab_glyph = "0.2"
 epaint_default_fonts = "0.32.3"
-eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "wayland"] }
+egui = "0.32.3"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+xkbcommon-dl = "0.4"
+rustix = { version = "1", features = ["event"] }
+serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tiny-skia = "0.11"
 tempfile = "3"
@@ -20,3 +24,7 @@ wl-clipboard-rs = "0.9"
 [profile.release]
 lto = "thin"
 strip = true
+
+[dev-dependencies]
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+libc = "0.2"

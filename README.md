@@ -1,65 +1,76 @@
 # Bullseye
 
-A native Rust screenshot editor for **Sway and wlroots**, inspired by Flameshot.
-Dark slate surfaces, mint accents, a quiet canvas, and tools that stay out of the way.
+A Rust screenshot tool for Sway: **freeze the desktop → drag a region → annotate → copy or save**.
 
-Capture talks directly to Wayland through `wlr-screencopy`; the editor uses egui/eframe's
-Wayland backend. No GTK, Qt, X11 window backend, or `grim`/`slurp`/`wl-copy` subprocesses
-are used by the app. A small process running the same Rust binary serves the clipboard
-until another application replaces it, so copying still works after closing the editor.
+Invoking Bullseye captures the displays before creating any UI. Native Wayland layer-shell
+overlays then show those frozen pixels, with a crosshair cursor. Drag to select; a small
+floating toolbar appears next to the selection. You keep working on the captured desktop.
+Copying or saving successfully dismisses the overlay.
+
+There are no sidebars, editor window, decorative canvas, or GPU context. The application
+uses Rust Wayland clients, egui for the small controls, and a software renderer that writes
+shared-memory buffers directly to the compositor. Runtime does not invoke `grim`, `slurp`,
+`wl-copy`, or other capture helpers, and uses no GTK or Qt.
 
 ## Run
 
 ```sh
-cargo run -- --demo                 # Explore the UI with a sample desktop
-cargo run                          # Capture, then open the editor
+cargo run                    # Freeze your displays and select a region
+cargo run -- --demo          # Try the same flow with a sample desktop
+cargo run -- --output DP-1   # Limit capture to one display
+cargo run -- --delay 3       # Wait before freezing, useful for menus and hover text
 cargo run -- --list-outputs
-cargo run -- --output DP-1          # Choose a monitor
-cargo run -- --fullscreen           # Fullscreen editor
-cargo run -- --open screenshot.png  # Annotate an existing PNG/JPEG
 ```
 
-The app uses Rust edition 2024 (Rust 1.88+ recommended for the current dependencies).
-A working Wayland session and EGL/OpenGL drivers are required for the editor; software
-rendering works with Mesa. Headless capture/export does not need a graphics context.
+Requires a recent Rust toolchain (edition 2024; dependencies require Rust 1.88+), a Wayland
+session with **wlr-screencopy and wlr-layer-shell**, and `libxkbcommon` for keyboard input.
+Sway is the tested compositor. EGL/OpenGL drivers are not required.
 
-## Tools
+## Use
 
-- Region selection with draggable corner handles and native pixel dimensions.
-- Freehand, arrows, rectangles, ellipses, translucent highlights, and opaque redaction.
-- Text captions and numbered pins.
-- Six annotation colors, adjustable stroke width, zoom, undo, and redo.
-- Atomic PNG saves and a persistent Wayland image clipboard.
-- Delayed capture, optional cursor capture, and explicit monitor selection.
+1. Invoke Bullseye while the content you want is visible. Hover text is captured before
+   the overlay takes input focus; the original application can keep changing underneath.
+2. Drag out a region. Resize it with the corner handles, or choose the selection tool
+   to move it. Selection is contained within one display.
+3. Pick pen, arrow, rectangle, ellipse, highlight, redaction, text, or numbered pins.
+   The color button opens a small palette and stroke-width control.
+4. For text, click the text tool, then click inside the selection. Type a caption and
+   press Enter or Add to place it.
+5. Copy to the Wayland clipboard, or save as PNG. The overlay closes after success.
+   Escape or right-click cancels without exporting.
 
-Draw a selection, choose a tool on the left, and drag or click on the image.
-For text, enter your caption in the inspector, then click to place it.
-Redaction completely replaces covered pixels with an opaque block.
-The exported PNG contains the selected region and all annotations at the original resolution.
+Save opens a small path dialog, initially pointing into `~/Pictures/Bullseye/`.
+Use `--save-to /path/to/shot.png` to choose a destination in advance and save immediately
+when clicking Save. PNG export contains only the selected native-resolution pixels and
+annotations. UI, dimming, and the crosshair are excluded. `--cursor` includes the original
+pointer in the captured desktop, before Bullseye replaces it with the crosshair.
 
-Save location defaults to `~/Pictures/Bullseye/`. Edit it in the inspector or launch with
-`--save-to /path/to/shot.png`. **New capture** closes the editor before taking a fresh shot;
-save or copy your current edits first.
+The clipboard is served by a small process running the same Rust binary. It remains
+available after the overlay exits, until another application replaces the selection.
+Saves encode into a temporary file before replacing the destination.
 
 | Key | Action |
 | --- | --- |
-| S / P / A | Select / pen / arrow |
+| S / P / A | Select or move region / pen / arrow |
 | R / E / H | Rectangle / ellipse / highlight |
-| B / T / N | Redact / text / numbered pin |
-| Ctrl+S / Ctrl+C | Save PNG / copy image |
+| B / T / N | Opaque redaction / text / numbered pin |
+| Ctrl+C | Copy and close |
+| Ctrl+S | Save and close |
 | Ctrl+Z | Undo |
 | Ctrl+Shift+Z or Ctrl+Y | Redo |
-| Ctrl+A | Reset to the full image |
-| F1 | Show shortcuts |
-| Esc | Cancel a drag, dismiss help, or close |
+| Enter | Commit text or save in the path dialog |
+| Esc | Cancel text/dialog/drag, or dismiss the capture |
 
-For a capture without opening the editor:
+Full-output automation, without the selection overlay:
 
 ```sh
-bullseye --delay 3 --cursor --save /tmp/shot.png
+bullseye --save /tmp/shot.png
 bullseye --output DP-1 --copy
-bullseye --save /tmp/shot.png --copy
+bullseye --delay 3 --cursor --save /tmp/shot.png --copy
 ```
+
+`--open image.png` uses an existing PNG/JPEG in the overlay. `--fullscreen` is accepted
+for compatibility; interactive capture always covers the desktop.
 
 ## Install and bind in Sway
 
@@ -67,59 +78,46 @@ bullseye --save /tmp/shot.png --copy
 cargo install --path . --locked
 ```
 
-Add to your Sway config (adjust the path if Cargo's bin directory differs):
-
 ```sway
 bindsym Print exec ~/.cargo/bin/bullseye
 bindsym $mod+Print exec ~/.cargo/bin/bullseye --copy
-for_window [app_id="bullseye"] floating enable
 ```
 
-The optional desktop launcher is in `packaging/bullseye.desktop`, with an SVG icon in
-`assets/bullseye.svg`. Install them to your desktop's applications and icon directories,
-and ensure `bullseye` is on the launcher’s PATH.
+No floating-window rule is needed: selection is a layer-shell overlay, independent of
+window tiling. The optional desktop launcher and icon are in `packaging/` and `assets/`.
 
-## Scope
-
-This is a first working implementation focused on Sway. The capture backend requires
-`wlr-screencopy`; compositors that expose it should work, but only headless Sway has
-been integration tested. **GNOME/KDE portal capture and ext-image-copy-capture are not
-implemented.** Importing an image and demo mode still work on their Wayland sessions.
-
-Capture selects one output at a time; the default is the first advertised output.
-Multi-monitor stitching, window selection, blur/pixelation, and layer-shell desktop
-selection overlays are future work. Selection currently happens on the captured image
-in the editor. Text uses the bundled Ubuntu font; complex-script shaping is not implemented.
-
-## Verify without touching your desktop
+## Headless verification
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo build --examples
 cargo build
+cargo build --examples
 python3 scripts/headless-test.py
 ```
 
-The integration harness requires **Sway, grim, wl-paste, Python 3, and Pillow** for testing
-only. It starts a software-rendered headless Sway compositor with a private runtime
-directory and explicitly removes the host display/socket variables. Its Rust virtual
-pointer driver refuses to connect outside that private headless runtime.
+The integration tests require Sway, wl-paste, Python 3, and Pillow. They start an isolated,
+software-rendered headless compositor in a private `/tmp` runtime directory and remove
+all host Wayland/display/IPC socket variables. Both the Rust input driver and changing
+desktop fixture refuse to run outside that private headless environment. Testing never
+opens a window in your desktop session.
 
-The harness checks native capture, output enumeration, HiDPI pixel preservation,
-clipboard persistence after process exit, editor startup/shutdown, and real pointer-driven
-cropping, annotation, saving, and copying. Rotated and mirrored outputs are compared
-pixel for pixel against grim as an independent reference. Screenshots and logs go to
-`target/headless-artifacts/`; it never opens windows in your desktop session.
+The suite checks the actual crosshair, exact region selection, toolbar actions, drawings,
+text entry through a virtual keyboard, clipboard persistence, saving and dismissal,
+HiDPI mapping, and multiple displays. A real hover-content fixture changes behind the
+capture overlay; its exported pixels must still exactly match the original hover content.
+Screenshots and logs are written to `target/headless-artifacts/`.
 
-## Implementation
+Unit tests additionally cover native screenshot buffer decoding, crop/history behavior,
+redaction edges, atomic PNG export, batched pointer events, and text/toolbar interactions.
 
-- `src/capture.rs`: Wayland output discovery, shared-memory screencopy, stride handling,
-  vertical inversion, output transforms, and a bounded capture timeout.
-- `src/document.rs`: image-space edits, crop/history state, Rust rasterization, and export.
-- `src/app.rs`: native editor and keyboard/pointer interactions.
-- `src/clipboard.rs`: PNG clipboard serving with the Rust data-control client.
-- `src/main.rs`: CLI, atomic export, and launch lifecycle.
+## Current limits
+
+Sway/wlroots is the focus. GNOME/KDE portal capture and ext-image-copy-capture are not
+implemented. Selection cannot span displays; choose a region on one frozen display.
+Text uses the bundled Ubuntu font without complex-script shaping, IME composition,
+or dead-key composition. Blur/pixelation and selecting a window automatically are future
+work. Desktop capture supports the common 8-bit RGB shared-memory formats.
 
 MIT licensed. Fonts are supplied by `epaint_default_fonts` under their upstream licenses.

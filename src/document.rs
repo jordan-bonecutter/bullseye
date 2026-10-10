@@ -1,5 +1,5 @@
 use ab_glyph::{Font, FontRef, ScaleFont};
-use eframe::egui::{Color32, Pos2, Rect};
+use egui::{Color32, Pos2, Rect};
 use image::{Rgba, RgbaImage};
 use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 
@@ -92,7 +92,7 @@ impl Document {
     pub fn bounds(&self) -> Rect {
         Rect::from_min_size(
             Pos2::ZERO,
-            eframe::egui::vec2(self.original.width() as f32, self.original.height() as f32),
+            egui::vec2(self.original.width() as f32, self.original.height() as f32),
         )
     }
     pub fn checkpoint(&mut self) {
@@ -220,7 +220,7 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
             let delta = b - a;
             if delta.length() > 0.0 {
                 let unit = delta.normalized();
-                let wing = eframe::egui::vec2(-unit.y, unit.x);
+                let wing = egui::vec2(-unit.y, unit.x);
                 let length = (mark.width * 4.0 + 10.0).min(delta.length() * 0.5);
                 let left = b - unit * length + wing * length * 0.5;
                 let right = b - unit * length - wing * length * 0.5;
