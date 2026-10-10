@@ -9,6 +9,11 @@ const ACCENT: Color32 = Color32::from_rgb(113, 175, 255);
 const INK: Color32 = Color32::from_rgb(236, 239, 243);
 const BAR: Color32 = Color32::from_rgb(30, 33, 38);
 
+struct FontPreview {
+    texture: egui::TextureHandle,
+    pixels_per_point: f32,
+    last_used: u64,
+}
 pub struct OverlayUi {
     pub ctx: Context,
     pub doc: Document,
@@ -22,6 +27,8 @@ pub struct OverlayUi {
     font: TextFont,
     font_search: String,
     font_definitions: egui::FontDefinitions,
+    font_previews: BTreeMap<String, FontPreview>,
+    preview_clock: u64,
     draft: Option<Mark>,
     moving: Option<(Rect, Pos2)>,
     text_anchor: Option<Pos2>,
@@ -65,6 +72,8 @@ impl OverlayUi {
             font,
             font_search: String::new(),
             font_definitions,
+            font_previews: BTreeMap::new(),
+            preview_clock: 0,
             draft: None,
             moving: None,
             text_anchor: None,
@@ -547,6 +556,65 @@ impl OverlayUi {
             painter.rect_filled(screen, 0, shade);
         }
     }
+    fn font_preview(&mut self, ui: &egui::Ui, choice: &crate::fonts::FontChoice, rect: Rect) {
+        let ppp = ui.ctx().pixels_per_point();
+        if self
+            .font_previews
+            .get(&choice.key)
+            .is_some_and(|p| p.pixels_per_point != ppp)
+        {
+            self.font_previews.remove(&choice.key);
+        }
+        self.preview_clock += 1;
+        if !self.font_previews.contains_key(&choice.key)
+            && let Some(font) = Catalog::system().load(choice)
+        {
+            if self.font_previews.len() >= 64 {
+                let oldest = self
+                    .font_previews
+                    .iter()
+                    .min_by_key(|(_, p)| p.last_used)
+                    .map(|(key, _)| key.clone())
+                    .unwrap();
+                self.font_previews.remove(&oldest);
+            }
+            let image = font.preview(
+                [(232. * ppp).ceil() as usize, (24. * ppp).ceil() as usize],
+                18. * ppp,
+                INK,
+            );
+            let texture = ui.ctx().load_texture(
+                format!("font-preview-{}", choice.key),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            self.font_previews.insert(
+                choice.key.clone(),
+                FontPreview {
+                    texture,
+                    pixels_per_point: ppp,
+                    last_used: self.preview_clock,
+                },
+            );
+        }
+        if let Some(preview) = self.font_previews.get_mut(&choice.key) {
+            preview.last_used = self.preview_clock;
+            ui.painter().image(
+                preview.texture.id(),
+                Rect::from_min_size(rect.min + Vec2::new(4., 2.), Vec2::new(232., 24.)),
+                Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
+                Color32::WHITE,
+            );
+        } else {
+            ui.painter().text(
+                rect.left_center() + Vec2::new(4., 0.),
+                Align2::LEFT_CENTER,
+                &choice.name,
+                FontId::proportional(14.),
+                INK,
+            );
+        }
+    }
     fn font_selector(&mut self, ui: &mut egui::Ui) {
         let button = ui.add_sized(
             Vec2::new(130., 29.),
@@ -558,39 +626,62 @@ impl OverlayUi {
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 let search = ui.add(
-                    egui::TextEdit::singleline(&mut self.font_search).hint_text("Find a font…"),
+                    egui::TextEdit::singleline(&mut self.font_search)
+                        .id_salt("font-search")
+                        .hint_text("Find a font…"),
                 );
+                if button.clicked() {
+                    search.request_focus();
+                }
                 self.hits.insert("font-search".into(), search.rect);
-                egui::ScrollArea::vertical()
+                let mut results = egui::ScrollArea::vertical()
+                    .id_salt("font-results")
                     .max_height(220.)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let catalog = Catalog::system();
-                        let search = self.font_search.to_lowercase();
-                        for choice in &catalog.choices {
-                            if !choice.name.to_lowercase().contains(&search) {
-                                continue;
+                    .auto_shrink([false, false]);
+                if button.clicked() || search.changed() {
+                    results = results.vertical_scroll_offset(0.);
+                }
+                let results = results.show(ui, |ui| {
+                    let catalog = Catalog::system();
+                    let search = self.font_search.to_lowercase();
+                    for choice in &catalog.choices {
+                        if !choice.name.to_lowercase().contains(&search) {
+                            continue;
+                        }
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 28.),
+                            Sense::click(),
+                        );
+                        if ui.is_rect_visible(rect) {
+                            self.hits.insert(format!("font-{}", choice.key), rect);
+                            if response.hovered() || self.font.key == choice.key {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    3,
+                                    if self.font.key == choice.key {
+                                        ACCENT.gamma_multiply(0.25)
+                                    } else {
+                                        Color32::from_gray(48)
+                                    },
+                                );
                             }
-                            let response =
-                                ui.selectable_label(self.font.key == choice.key, &choice.name);
-                            if ui.is_rect_visible(response.rect) {
-                                self.hits
-                                    .insert(format!("font-{}", choice.key), response.rect);
-                            }
-                            if response.clicked() {
-                                if let Some(font) = catalog.load(choice) {
-                                    font.install(&self.ctx, &mut self.font_definitions);
-                                    self.font = font;
-                                    self.font_search.clear();
-                                    self.ctx.request_repaint();
-                                    ui.close();
-                                } else {
-                                    self.error =
-                                        Some("This font cannot be loaded for annotations.".into());
-                                }
+                            self.font_preview(ui, choice, rect);
+                        }
+                        if response.clicked() {
+                            if let Some(font) = catalog.load(choice) {
+                                font.install(&self.ctx, &mut self.font_definitions);
+                                self.font = font;
+                                self.font_search.clear();
+                                self.ctx.request_repaint();
+                                ui.close();
+                            } else {
+                                self.error =
+                                    Some("This font cannot be loaded for annotations.".into());
                             }
                         }
-                    });
+                    }
+                });
+                self.hits.insert("font-results".into(), results.inner_rect);
             });
     }
     fn toolbar(&mut self, ctx: &Context, logical: Vec2, scale: Vec2) {

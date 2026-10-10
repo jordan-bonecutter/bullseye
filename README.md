@@ -40,7 +40,9 @@ driver; headless tests exercise the same rendering path with Mesa llvmpipe.
    The color button opens a full hue/saturation/value, RGBA, and opacity picker, plus
    the stroke-width control.
 4. For text, click the text tool. Its toolbar shows a searchable font selector with
-   bundled Ubuntu Light/Hack and installed system fonts. Click inside the selection
+   bundled Ubuntu Light/Hack and installed system fonts. Opening it focuses search;
+   scroll the results with a wheel or trackpad. Each name previews its own font.
+   Click inside the selection
    and type a caption; its preview appears directly on the image. Press Enter, click
    elsewhere, or export to
    finish it; Escape discards the pending caption. Each caption keeps its chosen font.
@@ -119,7 +121,8 @@ Testing never opens a window in your desktop session.
 
 The suite checks the actual crosshair, exact region selection, toolbar actions, drawings,
 inline text previews and held-key repeat through a virtual keyboard, bundled/system
-font selection and export, stationary dots, bent highlighter
+font search autofocus, filtered wheel/trackpad scrolling, selection and export,
+stationary dots, bent highlighter
 strokes, icon antialiasing, full color selection, clipboard persistence, portal saving,
 cancellation, unavailable-portal fallback, and dismissal,
 HiDPI mapping, and multiple displays. A real hover-content fixture changes behind the

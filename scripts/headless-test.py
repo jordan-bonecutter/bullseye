@@ -203,6 +203,27 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             click(*selected['buttons']['font'])
             selected=wait_for(lambda:state() if 'font-Hack' in state()['buttons'] else None,'Bundled monospace font missing')
             snapshot('font-picker.png')
+
+            def visible_fonts():
+                return {k for k in state()['buttons'] if k.startswith('font-') and k not in ('font-search','font-results')}
+
+            # Opening focuses search without another click. Filtered results still scroll.
+            input_actions('type a\nwait 150\n')
+            wait_for(lambda:'font-Ubuntu-Light' not in visible_fonts() and 'font-Hack' in visible_fonts(),'Opening font picker did not focus search')
+            before=visible_fonts()
+            x,y=state()['buttons']['font-results']
+            input_actions(f'move {int(x)} {int(y)}\nscroll 4\nwait 350\n')
+            wait_for(lambda:visible_fonts()!=before,'Mouse wheel did not scroll filtered fonts')
+            snapshot('font-picker-filtered-scroll.png')
+            # Editing the filter returns to the top, with keyboard focus retained after scrolling.
+            input_actions('shortcut a\nkey 14\nwait 200\n')
+            wait_for(lambda:'font-Ubuntu-Light' in visible_fonts(),'Clearing search did not reset results to the top')
+            before=visible_fonts()
+            input_actions('scroll-pixels 120\nwait 350\n')
+            wait_for(lambda:visible_fonts()!=before,'Trackpad did not scroll font results')
+            snapshot('font-picker-trackpad-scroll.png')
+            input_actions('type hack\nwait 200\n')
+            selected=wait_for(lambda:state() if visible_fonts()=={'font-Hack'} else None,'Search did not reset scrolled results or find Hack')
             click(*selected['buttons']['font-Hack'])
             wait_for(lambda:state() if state().get('font')=='Hack' else None,'Font did not switch to Hack')
             click(450,350)
@@ -214,9 +235,8 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             selected=state()
             click(*selected['buttons']['font'])
             selected=wait_for(lambda:state() if 'font-search' in state()['buttons'] else None,'Font search missing')
-            click(*selected['buttons']['font-search'])
             input_actions('type hack\nwait 150\n')
-            selected=wait_for(lambda:state() if 'font-Hack' in state()['buttons'] else None,'Font search did not find Hack')
+            selected=wait_for(lambda:state() if visible_fonts()=={'font-Hack'} else None,'Reopening font picker did not focus search')
             assert selected['text']=='iiiwww','Font search edited the pending caption'
             click(*selected['buttons']['font-Hack'])
             selected=state()
@@ -235,7 +255,7 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             mono=ImageChops.difference(fonts.crop((150,150,350,190)),base.crop((450,350,650,390)))
             system=ImageChops.difference(fonts.crop((150,250,350,290)),base.crop((450,450,650,490)))
             assert mono.getbbox() and system.getbbox() and mono.tobytes()!=system.tobytes(),'Font selection did not affect PNG export'
-            print('PASS bundled and installed font selection, per-caption retention, and PNG export',flush=True)
+            print('PASS font search autofocus, filtered wheel/trackpad scrolling, selection, per-caption retention, and PNG export',flush=True)
 
             # Stationary pen clicks must produce pixels, even without pointer motion.
             dots_path=ARTIFACTS/'dots-export.png'

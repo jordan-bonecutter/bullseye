@@ -43,6 +43,45 @@ impl TextFont {
             egui::FontFamily::Name(self.key.clone().into()),
         )
     }
+    /// Rasterize a small label once; font-picker scrolling never rebuilds the annotation font atlas.
+    pub fn preview(&self, size: [usize; 2], height: f32, color: egui::Color32) -> egui::ColorImage {
+        use ab_glyph::ScaleFont;
+        let mut image = egui::ColorImage::filled(size, egui::Color32::TRANSPARENT);
+        let face = self.face();
+        let fallback = TextFont::default();
+        let fallback_face = fallback.face();
+        let scaled = face.as_scaled(height);
+        let fallback_scaled = fallback_face.as_scaled(height);
+        let mut x = 0.;
+        let [r, g, b, alpha] = color.to_srgba_unmultiplied();
+        for c in self.name.chars() {
+            if x >= size[0] as f32 {
+                break;
+            }
+            let (font, id) = if scaled.glyph_id(c).0 != 0 {
+                (&scaled, scaled.glyph_id(c))
+            } else {
+                (&fallback_scaled, fallback_scaled.glyph_id(c))
+            };
+            let glyph = id.with_scale_and_position(height, ab_glyph::point(x, font.ascent()));
+            x += font.h_advance(id);
+            if let Some(outline) = font.outline_glyph(glyph) {
+                let bounds = outline.px_bounds();
+                outline.draw(|px, py, coverage| {
+                    let px = px as i32 + bounds.min.x as i32;
+                    let py = py as i32 + bounds.min.y as i32;
+                    if px >= 0 && py >= 0 && (px as usize) < size[0] && (py as usize) < size[1] {
+                        let pixel = &mut image.pixels[py as usize * size[0] + px as usize];
+                        let source = (coverage * f32::from(alpha)).round() as u8;
+                        let combined = u16::from(source)
+                            + u16::from(pixel.a()) * (255 - u16::from(source)) / 255;
+                        *pixel = egui::Color32::from_rgba_unmultiplied(r, g, b, combined as u8);
+                    }
+                });
+            }
+        }
+        image
+    }
     pub fn install(&self, ctx: &egui::Context, definitions: &mut egui::FontDefinitions) {
         if !definitions.font_data.contains_key(&self.key) {
             let mut data = egui::FontData::from_owned(self.data.to_vec());
@@ -117,5 +156,27 @@ impl Catalog {
                 })
             })?,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn preview_uses_each_font_and_keeps_its_background_transparent() {
+        let ubuntu = TextFont::default();
+        let mut hack = TextFont::bundled("Hack", "Hack", epaint_default_fonts::HACK_REGULAR);
+        hack.name = ubuntu.name.clone();
+        let first = ubuntu.preview([240, 24], 18., egui::Color32::WHITE);
+        let second = hack.preview([240, 24], 18., egui::Color32::WHITE);
+        assert_ne!(
+            first.pixels, second.pixels,
+            "Each label must use its own font face"
+        );
+        assert!(first.pixels.iter().any(|p| p.a() == 0));
+        assert!(
+            first.pixels.iter().any(|p| p.a() > 0 && p.a() < 255),
+            "Glyph edges need antialiasing coverage"
+        );
     }
 }

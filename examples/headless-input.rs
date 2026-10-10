@@ -133,6 +133,24 @@ fn main() -> Result<()> {
                 pointer.motion_absolute(time, x.parse()?, y.parse()?, extent.0, extent.1)
             }
             ["extent", w, h] => extent = (w.parse()?, h.parse()?),
+            ["scroll", value] => {
+                let steps: i32 = value.parse()?;
+                pointer.axis_source(wayland_client::protocol::wl_pointer::AxisSource::Wheel);
+                pointer.axis_discrete(
+                    time,
+                    wayland_client::protocol::wl_pointer::Axis::VerticalScroll,
+                    f64::from(steps) * 10.,
+                    steps,
+                );
+            }
+            ["scroll-pixels", value] => {
+                pointer.axis_source(wayland_client::protocol::wl_pointer::AxisSource::Finger);
+                pointer.axis(
+                    time,
+                    wayland_client::protocol::wl_pointer::Axis::VerticalScroll,
+                    value.parse()?,
+                );
+            }
             ["press"] => pointer.button(time, 0x110, ButtonState::Pressed),
             ["release"] => pointer.button(time, 0x110, ButtonState::Released),
             ["keydown", value] => keyboard.key(time, value.parse()?, 1),

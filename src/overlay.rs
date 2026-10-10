@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, WEnum, delegate_noop,
+    Connection, Dispatch, Proxy, QueueHandle, WEnum, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
         wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry,
@@ -58,6 +58,8 @@ struct State {
     keyboard_view: Option<usize>,
     selected: Option<usize>,
     position: Pos2,
+    axis_pixels: Vec2,
+    axis_steps: Vec2,
     primary_down: bool,
     picking: bool,
     cursor_surface: wl_surface::WlSurface,
@@ -117,6 +119,8 @@ pub fn run(
         keyboard_view: None,
         selected: None,
         position: Pos2::ZERO,
+        axis_pixels: Vec2::ZERO,
+        axis_steps: Vec2::ZERO,
         primary_down: false,
         picking: false,
         cursor_surface,
@@ -295,6 +299,27 @@ fn write_buffer(slot: &mut Slot, image: &RgbaImage) -> Result<()> {
     Ok(())
 }
 impl State {
+    fn scroll(&mut self) {
+        let pixels = std::mem::take(&mut self.axis_pixels);
+        let steps = std::mem::take(&mut self.axis_steps);
+        if let Some(idx) = self.pointer_view
+            && (pixels != Vec2::ZERO || steps != Vec2::ZERO)
+        {
+            let (unit, delta) = if steps != Vec2::ZERO {
+                (egui::MouseWheelUnit::Line, -steps)
+            } else {
+                (egui::MouseWheelUnit::Point, -pixels)
+            };
+            self.input(
+                idx,
+                Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers: self.modifiers,
+                },
+            );
+        }
+    }
     fn repeat_keys(&mut self) {
         if self.picking || self.keyboard_view.is_none() {
             self.repeat.cancel();
@@ -587,7 +612,32 @@ impl Dispatch<wl_pointer::WlPointer, ()> for State {
                     state.input(idx, Event::PointerGone);
                 }
                 state.pointer_view = None;
+                state.axis_pixels = Vec2::ZERO;
+                state.axis_steps = Vec2::ZERO;
             }
+            wl_pointer::Event::Axis {
+                axis: WEnum::Value(axis),
+                value,
+                ..
+            } => {
+                match axis {
+                    wl_pointer::Axis::VerticalScroll => state.axis_pixels.y += value as f32,
+                    wl_pointer::Axis::HorizontalScroll => state.axis_pixels.x += value as f32,
+                    _ => {}
+                }
+                if pointer.version() < 5 {
+                    state.scroll();
+                }
+            }
+            wl_pointer::Event::AxisDiscrete {
+                axis: WEnum::Value(axis),
+                discrete,
+            } => match axis {
+                wl_pointer::Axis::VerticalScroll => state.axis_steps.y += discrete as f32,
+                wl_pointer::Axis::HorizontalScroll => state.axis_steps.x += discrete as f32,
+                _ => {}
+            },
+            wl_pointer::Event::Frame => state.scroll(),
             wl_pointer::Event::Button {
                 button,
                 state: WEnum::Value(button_state),
