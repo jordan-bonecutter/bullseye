@@ -7,6 +7,7 @@ mod fonts;
 mod gpu;
 mod keyboard;
 mod overlay;
+mod startup;
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -112,6 +113,7 @@ pub fn save_png(image: &image::RgbaImage, path: &Path) -> Result<()> {
     Ok(())
 }
 fn run() -> Result<()> {
+    startup::start();
     let Some(args) = args()? else {
         return Ok(());
     };
@@ -124,7 +126,19 @@ fn run() -> Result<()> {
     if args.delay > 0 {
         std::thread::sleep(Duration::from_secs(args.delay));
     }
-    let (image, label) = if args.demo {
+    let mut captured = if !args.demo
+        && args.open.is_none()
+        && args.output.is_none()
+        && args.save.is_none()
+        && !args.copy
+    {
+        Some(capture::screenshots(args.cursor)?)
+    } else {
+        None
+    };
+    let (image, label) = if let Some(images) = &mut captured {
+        images.remove(0)
+    } else if args.demo {
         (document::demo_image(), "Demo workspace · 1440 × 900".into())
     } else if let Some(path) = &args.open {
         (
@@ -139,6 +153,7 @@ fn run() -> Result<()> {
     } else {
         capture::screenshot(args.output.clone(), args.cursor)?
     };
+    startup::stage("capture");
     if let Some(path) = &args.save {
         save_png(&image, path)?;
         println!("Saved {}", path.display());
@@ -156,25 +171,28 @@ fn run() -> Result<()> {
     let explicit_destination = args.save_to.is_some();
     let destination = args.save_to.unwrap_or_else(default_path);
     let images = if args.demo || args.open.is_some() || args.output.is_some() {
-        let name = args
-            .output
-            .or_else(|| {
+        let name = if !args.demo && args.open.is_none() {
+            Some(label)
+        } else {
+            args.output.or_else(|| {
                 capture::list_outputs()
                     .ok()
                     .and_then(|names| names.into_iter().next())
             })
-            .context("No Wayland outputs")?;
+        }
+        .context("No Wayland outputs")?;
         vec![(image, name)]
     } else {
-        let mut images = vec![(image, label.clone())];
-        for name in capture::list_outputs()? {
-            if name != label {
-                images.push(capture::screenshot(Some(name), args.cursor)?);
-            }
-        }
+        let mut images = vec![(image, label)];
+        images.extend(captured.unwrap_or_default());
         images
     };
-    overlay::run(images, destination, explicit_destination)?;
+    overlay::run(
+        images,
+        destination,
+        explicit_destination,
+        args.open.is_none(),
+    )?;
     Ok(())
 }
 fn main() {

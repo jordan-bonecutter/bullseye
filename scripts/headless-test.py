@@ -199,14 +199,14 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             drag(300,200,1000,600)
             selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No font toolbar')
             click(*selected['buttons']['t'])
-            selected=wait_for(lambda:state() if 'font' in state()['buttons'] else None,'Font selector missing')
+            selected=wait_for(lambda:state() if 'font' in state()['buttons'] and state().get('toolbar_visible') else None,'Font selector missing')
             click(*selected['buttons']['font'])
             selected=wait_for(lambda:state() if 'font-Hack' in state()['buttons'] else None,'Bundled monospace font missing')
             assert selected['buttons']['font-results'][0] - selected['buttons']['font'][0] >= 140,'Font dropdown is too narrow'
             snapshot('font-picker.png')
 
             def visible_fonts():
-                return {k for k in state()['buttons'] if k.startswith('font-') and k not in ('font-search','font-results')}
+                return {k for k in state()['buttons'] if k in ('font-Hack','font-Ubuntu-Light') or k.startswith('font-system-')}
 
             # Opening focuses search without another click. Filtered results still scroll.
             input_actions('type a\nwait 150\n')
@@ -257,6 +257,44 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             system=ImageChops.difference(fonts.crop((150,250,350,290)),base.crop((450,450,650,490)))
             assert mono.getbbox() and system.getbbox() and mono.tobytes()!=system.tobytes(),'Font selection did not affect PNG export'
             print('PASS font search autofocus, filtered wheel/trackpad scrolling, selection, per-caption retention, and PNG export',flush=True)
+
+            # Size edits resize the live preview and preserve earlier captions and exported sizing.
+            size_path=ARTIFACTS/'font-size-export.png'
+            overlay,state=launch('font-size',('--demo','--save-to',str(size_path)))
+            drag(300,200,1000,600)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'No size toolbar')
+            click(*selected['buttons']['t'])
+            click(450,300)
+            input_actions('type size\nkey 28\nwait 100\n')
+            first=snapshot('font-size-first.png')
+            click(450,430)
+            input_actions('type size\nwait 100\n')
+            small=snapshot('font-size-small.png')
+            click(*state()['buttons']['font-size'])
+            input_actions('shortcut a\ntype 56\nkey 28\nwait 150\n')
+            selected=wait_for(lambda:state() if state().get('font_size')==56 else None,'Font size did not change')
+            assert selected['text']=='size' and selected['marks']==1,'Size editing changed or committed the caption'
+            large=snapshot('font-size-large.png')
+            region=(450,430,800,530)
+            background=base.crop(region)
+            small_bounds=ImageChops.difference(small.crop(region),background).getbbox()
+            large_bounds=ImageChops.difference(large.crop(region),background).getbbox()
+            assert large_bounds[2]-large_bounds[0] >= 1.8*(small_bounds[2]-small_bounds[0]),'Size did not enlarge the live preview'
+            assert ImageChops.difference(first.crop((450,300,800,390)),large.crop((450,300,800,390))).getbbox() is None,'Changing size altered an earlier caption'
+            input_actions('key 28\nwait 150\n')
+            selected=wait_for(lambda:state() if state()['marks']==2 else None,'Resized caption did not commit')
+            committed=snapshot('font-size-committed.png')
+            committed_bounds=ImageChops.difference(committed.crop(region),background).getbbox()
+            x,y=selected['buttons']['font-size']
+            drag(int(x),int(y),int(x)-12,int(y))
+            selected=wait_for(lambda:state() if state()['font_size']<56 else None,'Dragging the text size did not change it')
+            assert selected['marks']==2 and selected['text'] is None,'Dragging size edited a committed caption'
+            click(*selected['buttons']['save'])
+            assert overlay.wait(timeout=15)==0
+            exported_size=Image.open(size_path).convert('RGB')
+            export_bounds=ImageChops.difference(exported_size.crop((150,230,500,330)),background).getbbox()
+            assert all(abs(a-b)<=2 for a,b in zip(committed_bounds,export_bounds)),(committed_bounds,export_bounds)
+            print('PASS text size editing, live resize, per-caption retention, and matching PNG export',flush=True)
 
             # Stationary pen clicks must produce pixels, even without pointer motion.
             dots_path=ARTIFACTS/'dots-export.png'
@@ -374,6 +412,24 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             assert snapshot('after-freeze.png').getpixel((20,20)) == (30,120,190), 'Fixture did not change underneath overlay'
             print('PASS desktop freezes before input focus; hover text survives live content changes', flush=True)
 
+            # Large captures use the GPU's actual texture limit and preserve rendered/exported pixels.
+            ipc('output HEADLESS-1 mode 3840x2160')
+            input_actions('extent 3840 2160\nwait 100\n')
+            reference_4k=snapshot('4k-before.png')
+            assert reference_4k.size==(3840,2160)
+            path_4k=ARTIFACTS/'4k-export.png'
+            overlay,state=launch('4k',('--save-to',str(path_4k)))
+            drag(80,80,500,350)
+            selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'4K overlay failed to start')
+            rendered_4k=snapshot('4k-overlay.png')
+            assert ImageChops.difference(rendered_4k.crop((120,120,480,300)),reference_4k.crop((120,120,480,300))).getbbox() is None,'Direct GPU upload changed screenshot colors'
+            click(*selected['buttons']['save'])
+            assert overlay.wait(timeout=15)==0
+            assert ImageChops.difference(Image.open(path_4k).convert('RGB'),reference_4k.crop((80,80,500,350))).getbbox() is None,'4K selection changed captured pixels'
+            ipc('output HEADLESS-1 mode 1440x900')
+            input_actions('extent 1440 900\n')
+            print('PASS 4K startup, direct GPU upload colors, and exact PNG export',flush=True)
+
             # Selection coordinates remain logical, while the exported crop stays in native pixels.
             ipc('output HEADLESS-1 scale 2')
             input_actions('extent 720 450\n')
@@ -384,7 +440,7 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'HiDPI toolbar missing')
             assert selected['crop']==[200,200,800,400],selected
             click(*selected['buttons']['t'])
-            selected=wait_for(lambda:state() if 'font' in state()['buttons'] else None,'HiDPI font selector missing')
+            selected=wait_for(lambda:state() if 'font' in state()['buttons'] and state().get('toolbar_visible') else None,'HiDPI font selector missing')
             click(*selected['buttons']['font'])
             wait_for(lambda:'font-Hack' in state()['buttons'],'HiDPI font previews missing')
             snapshot('font-picker-hidpi.png')
@@ -412,6 +468,9 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             layout={o['name']:o['rect'] for o in outputs}
             assert layout['HEADLESS-1']['x']==0 and layout['HEADLESS-2']['x']==1440,layout
             input_actions('extent 2240 900\n')
+            second_reference_path=ARTIFACTS/'second-output-before.png'
+            run([str(BINARY),'--output','HEADLESS-2','--save',str(second_reference_path)],env)
+            second_reference=Image.open(second_reference_path).convert('RGB')
             second_path=ARTIFACTS/'second-output-selection.png'
             second_path.unlink(missing_ok=True)
             overlay,state=launch('multi-output',('--save-to',str(second_path)))
@@ -423,7 +482,7 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             click(x+1440,y)
             assert overlay.wait(timeout=15)==0
             second=Image.open(second_path).convert('RGB')
-            assert second.size==(420,300) and second.getbbox() is None,'Second output crop is incorrect'
+            assert second.size==(420,300) and ImageChops.difference(second,second_reference.crop((80,200,500,500))).getbbox() is None,'Second output crop is incorrect'
             print('PASS all outputs freeze; selection and export work on the second monitor',flush=True)
         finally:
             for process, handle in processes:

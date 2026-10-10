@@ -94,6 +94,8 @@ fn code(c: char) -> Result<u32> {
         'x' => 45,
         'y' => 21,
         'z' => 44,
+        '1'..='9' => 2 + u32::from(c) - u32::from('1'),
+        '0' => 11,
         ' ' => 57,
         _ => bail!("Unsupported fixture character: {c}"),
     })

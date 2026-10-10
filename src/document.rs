@@ -61,6 +61,7 @@ pub struct Mark {
     pub points: Vec<Pos2>,
     pub color: Color32,
     pub width: f32,
+    pub font_size: f32,
     pub text: String,
     pub font: TextFont,
 }
@@ -204,14 +205,7 @@ fn render_mark(image: &mut RgbaImage, mark: &Mark) {
                 Color32::from_rgb(16, 25, 25),
             );
         } else {
-            draw_text_with_font(
-                image,
-                &mark.text,
-                a,
-                mark.width * 3.0 + 16.0,
-                mark.color,
-                &mark.font,
-            );
+            draw_text_with_font(image, &mark.text, a, mark.font_size, mark.color, &mark.font);
         }
         return;
     }
@@ -496,6 +490,7 @@ mod tests {
             color: Color32::RED,
             width: 3.,
             font: TextFont::default(),
+            font_size: 28.,
             text: String::new(),
         });
         assert_eq!(d.export().get_pixel(7, 7).0, [12, 16, 22, 255]);
@@ -520,6 +515,7 @@ mod tests {
             color: Color32::RED,
             width: 3.0,
             font: TextFont::default(),
+            font_size: 28.,
             text: String::new(),
         });
         let image = d.export();
@@ -537,6 +533,7 @@ mod tests {
                 color: Color32::from_rgba_unmultiplied(255, 0, 0, alpha),
                 width: 4.,
                 font: TextFont::default(),
+                font_size: 28.,
                 text: String::new(),
             });
             let image = d.export();
@@ -555,6 +552,7 @@ mod tests {
                 color: Color32::RED,
                 width: 3.,
                 font: TextFont::default(),
+                font_size: 28.,
                 text: "Hi".into(),
             });
         }

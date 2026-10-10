@@ -41,6 +41,7 @@ struct View {
     width: u32,
     height: u32,
     ui: OverlayUi,
+    captured: bool,
     gpu: Option<Gpu>,
     input: Vec<Event>,
     dirty: bool,
@@ -67,6 +68,7 @@ struct State {
     exit: bool,
     error: Option<String>,
     started: Instant,
+    opaque: bool,
 }
 #[derive(Clone, Copy)]
 struct BufferData {
@@ -77,6 +79,7 @@ pub fn run(
     images: Vec<(RgbaImage, String)>,
     destination: PathBuf,
     explicit_destination: bool,
+    opaque: bool,
 ) -> Result<()> {
     let conn = Connection::connect_to_env().context("Connect to Wayland for selection")?;
     let (globals, mut queue) = registry_queue_init::<State>(&conn)?;
@@ -128,6 +131,7 @@ pub fn run(
         exit: false,
         error: None,
         started: Instant::now(),
+        opaque,
     };
     for global in globals.contents().clone_list() {
         if global.interface == "wl_output" {
@@ -152,6 +156,7 @@ pub fn run(
                     explicit_destination,
                 ),
                 gpu: None,
+                captured: false,
                 input: vec![],
                 dirty: false,
                 frame_pending: false,
@@ -164,9 +169,10 @@ pub fn run(
         .context("Missing Wayland seat")?;
     queue.roundtrip(&mut state)?;
     let mut mapped = 0;
-    for view in &mut state.views {
-        if let Some((image, _)) = images.iter().find(|(_, name)| name == &view.name) {
-            view.ui = OverlayUi::new(image.clone(), destination.clone(), explicit_destination);
+    for (image, name) in images {
+        if let Some(view) = state.views.iter_mut().find(|view| view.name == name) {
+            view.ui = OverlayUi::new(image, destination.clone(), explicit_destination);
+            view.captured = true;
             mapped += 1;
         } else {
             continue;
@@ -176,7 +182,7 @@ pub fn run(
         bail!("Captured outputs disappeared before selection started");
     }
     for (idx, view) in state.views.iter_mut().enumerate() {
-        if !images.iter().any(|(_, name)| name == &view.name) {
+        if !view.captured {
             continue;
         }
         let surface = compositor.create_surface(&qh, ());
@@ -200,6 +206,7 @@ pub fn run(
         view.layer = Some(layer);
     }
     conn.flush()?;
+    crate::startup::stage("overlay setup");
     while !state.exit {
         queue.dispatch_pending(&mut state)?;
         state.repeat_keys();
@@ -368,17 +375,37 @@ impl State {
                 (view.width, view.height)
             };
             if view.gpu.is_none() {
-                view.gpu = Some(Gpu::new(conn, &surface, buffer_size)?);
+                let mut gpu = Gpu::new(conn, &surface, buffer_size)?;
+                if self.opaque {
+                    view.ui
+                        .set_frozen_texture(gpu.upload_frozen(&view.ui.doc.original)?);
+                }
+                view.gpu = Some(gpu);
+                crate::startup::stage("GPU ready");
             }
             let active = self.selected.is_none_or(|selected| selected == idx);
             let ppp = buffer_size.0 as f32 / view.width as f32;
             let logical = Vec2::new(view.width as f32, view.height as f32);
+            // egui also uses this limit as its font-atlas width. Native captures bypass that
+            // atlas, so don't allocate a GPU-maximum-width atlas just to show the selection hint.
+            let managed_limit = if self.opaque {
+                4096
+            } else {
+                4096.max(native.0.max(native.1) as usize)
+            };
             let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, logical)),
                 events: std::mem::take(&mut view.input),
                 modifiers: self.modifiers,
                 time: Some(self.started.elapsed().as_secs_f64()),
                 focused: true,
+                max_texture_side: Some(
+                    view.gpu
+                        .as_ref()
+                        .unwrap()
+                        .max_texture_side()
+                        .min(managed_limit),
+                ),
                 ..Default::default()
             };
             raw.viewports
@@ -387,6 +414,9 @@ impl State {
                 .native_pixels_per_point = Some(ppp);
             let frame_started = Instant::now();
             let output = view.ui.frame(raw, logical, active);
+            if view.ui.ctx.cumulative_frame_nr() == 1 {
+                crate::startup::stage("first UI frame prepared");
+            }
             let repaint_delay = output
                 .viewport_output
                 .get(&egui::ViewportId::ROOT)
@@ -408,6 +438,9 @@ impl State {
                 &primitives,
                 &output.textures_delta,
             )?;
+            if view.ui.ctx.cumulative_frame_nr() == 1 {
+                crate::startup::stage("first frame submitted");
+            }
             view.dirty = false;
             if let Ok(path) = std::env::var("BULLSEYE_TEST_STATE")
                 && std::env::var("XDG_RUNTIME_DIR")
@@ -421,7 +454,7 @@ impl State {
                     .map(|(k, r)| (k.clone(), serde_json::json!([r.center().x, r.center().y])))
                     .collect();
                 let (x, y, w, h) = view.ui.doc.crop_pixels();
-                let data = serde_json::json!({"views":metadata,"output":view.name,"phase":if view.ui.doc.crop.is_some(){"annotate"}else{"select"},"buttons":hits,"crop":[x,y,w,h],"marks":view.ui.doc.marks.len(),"logical":[view.width,view.height],"frame":view.ui.ctx.cumulative_frame_nr(),"primitives":primitives.len(),"toolbar_visible":view.ui.toolbar_visible,"text":view.ui.pending_text(),"tool":view.ui.tool(),"font":view.ui.selected_font(),"color":view.ui.color(),"render_us":frame_started.elapsed().as_micros(),"texture_updates":output.textures_delta.set.len(),"picker":view.ui.picker_active(),"save_dialog":view.ui.fallback_dialog(),"repaint_ms":repaint_delay.as_millis().min(1000000)});
+                let data = serde_json::json!({"views":metadata,"output":view.name,"phase":if view.ui.doc.crop.is_some(){"annotate"}else{"select"},"buttons":hits,"crop":[x,y,w,h],"marks":view.ui.doc.marks.len(),"logical":[view.width,view.height],"frame":view.ui.ctx.cumulative_frame_nr(),"primitives":primitives.len(),"toolbar_visible":view.ui.toolbar_visible,"text":view.ui.pending_text(),"tool":view.ui.tool(),"font":view.ui.selected_font(),"font_size":view.ui.font_size(),"color":view.ui.color(),"render_us":frame_started.elapsed().as_micros(),"texture_updates":output.textures_delta.set.len(),"picker":view.ui.picker_active(),"save_dialog":view.ui.fallback_dialog(),"repaint_ms":repaint_delay.as_millis().min(1000000)});
                 let parent = std::path::Path::new(&path)
                     .parent()
                     .unwrap_or(std::path::Path::new("."));

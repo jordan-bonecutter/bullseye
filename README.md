@@ -43,10 +43,13 @@ driver; headless tests exercise the same rendering path with Mesa llvmpipe.
    bundled Ubuntu Light/Hack and installed system fonts. Opening it focuses search;
    scroll the results with a wheel or trackpad. Each name previews its own font
    with crisp, supersampled text; the dropdown sizes itself to fit the names.
+   The size field beside it sets text height in screenshot pixels (8–256 px).
+   Drag it or click to type a size; the pending caption resizes immediately.
    Click inside the selection
    and type a caption; its preview appears directly on the image. Press Enter, click
    elsewhere, or export to
-   finish it; Escape discards the pending caption. Each caption keeps its chosen font.
+   finish it; Escape discards the pending caption. Each caption keeps its chosen font
+   and size, independently of the drawing stroke width.
    Held keys repeat using the compositor’s configured delay and rate.
 5. Copy to the Wayland clipboard, or save as PNG. The overlay closes after success.
    Escape or right-click cancels without exporting.
@@ -122,17 +125,35 @@ Testing never opens a window in your desktop session.
 
 The suite checks the actual crosshair, exact region selection, toolbar actions, drawings,
 inline text previews and held-key repeat through a virtual keyboard, bundled/system
-font search autofocus, filtered wheel/trackpad scrolling, selection and export,
+font search autofocus, filtered wheel/trackpad scrolling, size editing, live resizing,
+selection and export,
 stationary dots, bent highlighter
 strokes, icon antialiasing, full color selection, clipboard persistence, portal saving,
 cancellation, unavailable-portal fallback, and dismissal,
-HiDPI mapping, and multiple displays. A real hover-content fixture changes behind the
+4K capture/rendering, HiDPI mapping, and multiple displays. A real hover-content fixture changes behind the
 capture overlay; its exported pixels must still exactly match the original hover content.
 Screenshots and logs are written to `target/headless-artifacts/`.
 
 Unit tests additionally cover native screenshot buffer decoding, crop/history behavior,
 redaction edges, color alpha compositing, atomic PNG export, batched pointer events,
 text/toolbar interactions, and reuse of the frozen texture during dragging.
+
+To measure startup without touching your desktop:
+
+```sh
+cargo build --release
+python3 scripts/startup-bench.py --runs 11 --large --profile
+# Compare alternating launches of an earlier release binary in the same compositor:
+python3 scripts/startup-bench.py --compare /path/to/older/bullseye --runs 11
+```
+
+The benchmark measures process launch to the first submitted overlay frame, with a
+2 ms polling resolution. It uses private headless Sway and Mesa llvmpipe with four
+rendering threads; timings differ from a hardware GPU. `--profile` includes elapsed
+times after capture, overlay setup, GPU initialization/upload, and the first frame.
+Native startup batches output captures on one connection, moves captured images
+into their overlays, uploads opaque pixels directly, and rasterizes UI glyphs on demand.
+`BULLSEYE_PROFILE_STARTUP=1` enables the same stage timings for ordinary launches.
 
 ## Current limits
 

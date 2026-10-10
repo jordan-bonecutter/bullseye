@@ -26,6 +26,7 @@ pub struct OverlayUi {
     tool: Tool,
     color: Color32,
     width: f32,
+    font_size: f32,
     font: TextFont,
     font_search: String,
     font_definitions: egui::FontDefinitions,
@@ -36,6 +37,7 @@ pub struct OverlayUi {
     text_anchor: Option<Pos2>,
     text: String,
     frozen: Option<egui::TextureHandle>,
+    native_frozen: Option<egui::TextureId>,
     save_request: bool,
     picker: Option<std::sync::mpsc::Receiver<anyhow::Result<Option<PathBuf>>>>,
     save_dialog: bool,
@@ -46,6 +48,8 @@ pub struct OverlayUi {
 impl OverlayUi {
     pub fn new(image: RgbaImage, destination: PathBuf, explicit_destination: bool) -> Self {
         let ctx = Context::default();
+        // The selection overlay needs only a short hint; rasterize other glyphs when first used.
+        ctx.options_mut(|options| options.preload_font_glyphs = false);
         let font = TextFont::default();
         let mut font_definitions = egui::FontDefinitions::default();
         font.install(&ctx, &mut font_definitions);
@@ -71,6 +75,7 @@ impl OverlayUi {
             tool: Tool::Crop,
             color: Color32::from_rgb(255, 91, 96),
             width: 4.,
+            font_size: 28.,
             font,
             font_search: String::new(),
             font_definitions,
@@ -81,6 +86,7 @@ impl OverlayUi {
             text_anchor: None,
             text: String::new(),
             frozen: None,
+            native_frozen: None,
             save_request: false,
             picker: None,
             save_dialog: false,
@@ -91,6 +97,12 @@ impl OverlayUi {
     }
     pub fn pending_text(&self) -> Option<&str> {
         self.text_anchor.map(|_| self.text.as_str())
+    }
+    pub fn set_frozen_texture(&mut self, texture: egui::TextureId) {
+        self.native_frozen = Some(texture);
+    }
+    pub fn font_size(&self) -> f32 {
+        self.font_size
     }
     pub fn selected_font(&self) -> &str {
         &self.font.name
@@ -130,6 +142,7 @@ impl OverlayUi {
                 points: vec![pos],
                 color: self.color,
                 width: self.width,
+                font_size: self.font_size,
                 text: self.text.clone(),
                 font: self.font.clone(),
             });
@@ -372,6 +385,7 @@ impl OverlayUi {
                             points: vec![p],
                             color: self.color,
                             width: self.width,
+                            font_size: self.font_size,
                             text: (self
                                 .doc
                                 .marks
@@ -396,6 +410,7 @@ impl OverlayUi {
                         points: vec![corner.map(|(_, opposite)| opposite).unwrap_or(p), p],
                         color: self.color,
                         width: self.width,
+                        font_size: self.font_size,
                         text: String::new(),
                     });
                 }
@@ -497,22 +512,26 @@ impl OverlayUi {
         }
     }
     fn paint_desktop(&mut self, painter: &egui::Painter, logical: Vec2, active: bool) {
-        let texture = self.frozen.get_or_insert_with(|| {
-            self.ctx.load_texture(
-                "frozen desktop",
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [
-                        self.doc.original.width() as usize,
-                        self.doc.original.height() as usize,
-                    ],
-                    self.doc.original.as_raw(),
-                ),
-                egui::TextureOptions::LINEAR,
-            )
+        let texture = self.native_frozen.unwrap_or_else(|| {
+            self.frozen
+                .get_or_insert_with(|| {
+                    self.ctx.load_texture(
+                        "frozen desktop",
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [
+                                self.doc.original.width() as usize,
+                                self.doc.original.height() as usize,
+                            ],
+                            self.doc.original.as_raw(),
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .id()
         });
         let screen = Rect::from_min_size(Pos2::ZERO, logical);
         painter.image(
-            texture.id(),
+            texture,
             screen,
             Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
             Color32::WHITE,
@@ -524,7 +543,7 @@ impl OverlayUi {
             }
             if let Some(anchor) = self.text_anchor {
                 let position = (anchor.to_vec2() / scale).to_pos2();
-                let font = self.font.font_id((self.width * 3. + 16.) / scale.x);
+                let font = self.font.font_id(self.font_size / scale.x);
                 let galley = painter.layout_no_wrap(self.text.clone(), font, self.color);
                 let caret = galley
                     .pos_from_cursor(egui::text::CCursor::new(self.text.chars().count()))
@@ -581,11 +600,12 @@ impl OverlayUi {
                 self.font_previews.remove(&oldest);
             }
             // Two samples per native pixel preserve fine strokes during GPU downsampling.
-            let resolution = 2. * ppp;
             let size = Vec2::new(
                 (font.preview_width(20.) * ppp).ceil() / ppp,
                 (28. * ppp).ceil() / ppp,
             );
+            let resolution =
+                (2. * ppp).min(ui.ctx().input(|i| i.max_texture_side) as f32 / size.x.max(size.y));
             let image = font.preview(
                 [
                     (size.x * resolution).ceil() as usize,
@@ -636,10 +656,14 @@ impl OverlayUi {
             egui::Button::new(&self.font.name).truncate(),
         );
         self.hits.insert("font".into(), button.rect);
-        let width = Catalog::system()
-            .picker_width()
-            .min((ui.ctx().screen_rect().width() - 24.).max(1.));
-        egui::Popup::menu(&button)
+        let popup = egui::Popup::menu(&button);
+        let width = if popup.is_open() || button.clicked() {
+            Catalog::system().picker_width()
+        } else {
+            440.
+        }
+        .min((ui.ctx().screen_rect().width() - 24.).max(1.));
+        popup
             .width(width)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
@@ -709,7 +733,7 @@ impl OverlayUi {
             (crop.min.to_vec2() / scale).to_pos2(),
             (crop.max.to_vec2() / scale).to_pos2(),
         );
-        let width: f32 = if self.tool == Tool::Text { 640. } else { 500. };
+        let width: f32 = if self.tool == Tool::Text { 712. } else { 500. };
         let x = r.center().x.clamp(
             (width / 2.).min(logical.x / 2.),
             (logical.x - width / 2.).max(logical.x / 2.),
@@ -751,6 +775,17 @@ impl OverlayUi {
                             }
                             if self.tool == Tool::Text {
                                 self.font_selector(ui);
+                                let size = ui.add_sized(
+                                    Vec2::new(64., 29.),
+                                    egui::DragValue::new(&mut self.font_size)
+                                        .range(8.0..=256.0)
+                                        .speed(1.)
+                                        .suffix(" px"),
+                                );
+                                self.hits.insert("font-size".into(), size.rect);
+                                size.on_hover_text(
+                                    "Text size in screenshot pixels. Drag or click to type.",
+                                );
                             }
                             ui.separator();
                             let palette = ui.menu_button(" ", |ui| {
@@ -1047,7 +1082,7 @@ fn paint_mark(p: &egui::Painter, mark: &Mark, scale: Vec2) {
                 a,
                 Align2::LEFT_TOP,
                 &mark.text,
-                mark.font.font_id((mark.width * 3. + 16.) / scale.x),
+                mark.font.font_id(mark.font_size / scale.x),
                 color,
             );
         }
