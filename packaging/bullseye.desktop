@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Bullseye
+Comment=Capture, annotate, and share screenshots on Wayland
+Exec=bullseye
+Icon=bullseye
+Terminal=false
+Categories=Graphics;Utility;
+Keywords=screenshot;capture;annotation;wayland;sway;
+StartupNotify=true
+StartupWMClass=bullseye
