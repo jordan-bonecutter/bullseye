@@ -1,6 +1,7 @@
 //! A selection and a small toolbar, drawn directly over the frozen desktop.
 use crate::document::{Document, Mark, Tool, highlight_color};
 use crate::fonts::{Catalog, TextFont};
+use egui::emath::GuiRounding;
 use egui::{Align2, Color32, Context, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use image::RgbaImage;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -11,6 +12,7 @@ const BAR: Color32 = Color32::from_rgb(30, 33, 38);
 
 struct FontPreview {
     texture: egui::TextureHandle,
+    size: Vec2,
     pixels_per_point: f32,
     last_used: u64,
 }
@@ -578,9 +580,18 @@ impl OverlayUi {
                     .unwrap();
                 self.font_previews.remove(&oldest);
             }
+            // Two samples per native pixel preserve fine strokes during GPU downsampling.
+            let resolution = 2. * ppp;
+            let size = Vec2::new(
+                (font.preview_width(20.) * ppp).ceil() / ppp,
+                (28. * ppp).ceil() / ppp,
+            );
             let image = font.preview(
-                [(232. * ppp).ceil() as usize, (24. * ppp).ceil() as usize],
-                18. * ppp,
+                [
+                    (size.x * resolution).ceil() as usize,
+                    (size.y * resolution).ceil() as usize,
+                ],
+                20. * resolution,
                 INK,
             );
             let texture = ui.ctx().load_texture(
@@ -592,6 +603,7 @@ impl OverlayUi {
                 choice.key.clone(),
                 FontPreview {
                     texture,
+                    size,
                     pixels_per_point: ppp,
                     last_used: self.preview_clock,
                 },
@@ -601,7 +613,10 @@ impl OverlayUi {
             preview.last_used = self.preview_clock;
             ui.painter().image(
                 preview.texture.id(),
-                Rect::from_min_size(rect.min + Vec2::new(4., 2.), Vec2::new(232., 24.)),
+                Rect::from_min_size(
+                    (rect.min + Vec2::new(4., 2.)).round_to_pixels(ppp),
+                    preview.size,
+                ),
                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1., 1.)),
                 Color32::WHITE,
             );
@@ -621,13 +636,17 @@ impl OverlayUi {
             egui::Button::new(&self.font.name).truncate(),
         );
         self.hits.insert("font".into(), button.rect);
+        let width = Catalog::system()
+            .picker_width()
+            .min((ui.ctx().screen_rect().width() - 24.).max(1.));
         egui::Popup::menu(&button)
-            .width(240.)
+            .width(width)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 let search = ui.add(
                     egui::TextEdit::singleline(&mut self.font_search)
                         .id_salt("font-search")
+                        .desired_width(ui.available_width())
                         .hint_text("Find a font…"),
                 );
                 if button.clicked() {
@@ -649,7 +668,7 @@ impl OverlayUi {
                             continue;
                         }
                         let (rect, response) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 28.),
+                            Vec2::new(ui.available_width(), 32.),
                             Sense::click(),
                         );
                         if ui.is_rect_visible(rect) {

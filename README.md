@@ -41,7 +41,8 @@ driver; headless tests exercise the same rendering path with Mesa llvmpipe.
    the stroke-width control.
 4. For text, click the text tool. Its toolbar shows a searchable font selector with
    bundled Ubuntu Light/Hack and installed system fonts. Opening it focuses search;
-   scroll the results with a wheel or trackpad. Each name previews its own font.
+   scroll the results with a wheel or trackpad. Each name previews its own font
+   with crisp, supersampled text; the dropdown sizes itself to fit the names.
    Click inside the selection
    and type a caption; its preview appears directly on the image. Press Enter, click
    elsewhere, or export to

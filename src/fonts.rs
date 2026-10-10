@@ -23,6 +23,9 @@ impl Default for TextFont {
     }
 }
 impl TextFont {
+    pub fn preview_width(&self, height: f32) -> f32 {
+        label_width(self.face(), &self.name, height)
+    }
     fn bundled(key: &str, name: &str, bytes: &[u8]) -> Self {
         Self {
             key: key.into(),
@@ -52,7 +55,7 @@ impl TextFont {
         let fallback_face = fallback.face();
         let scaled = face.as_scaled(height);
         let fallback_scaled = fallback_face.as_scaled(height);
-        let mut x = 0.;
+        let mut x = height * 0.1;
         let [r, g, b, alpha] = color.to_srgba_unmultiplied();
         for c in self.name.chars() {
             if x >= size[0] as f32 {
@@ -97,6 +100,29 @@ impl TextFont {
         ctx.set_fonts(definitions.clone());
     }
 }
+
+fn label_width(face: FontRef<'_>, name: &str, height: f32) -> f32 {
+    use ab_glyph::ScaleFont;
+    let fallback = TextFont::default();
+    let fallback_face = fallback.face();
+    let scaled = face.as_scaled(height);
+    let fallback_scaled = fallback_face.as_scaled(height);
+    let mut x = height * 0.1;
+    let mut right = x;
+    for c in name.chars() {
+        let (font, id) = if scaled.glyph_id(c).0 != 0 {
+            (&scaled, scaled.glyph_id(c))
+        } else {
+            (&fallback_scaled, fallback_scaled.glyph_id(c))
+        };
+        let glyph = id.with_scale_and_position(height, ab_glyph::point(x, font.ascent()));
+        if let Some(outline) = font.outline_glyph(glyph) {
+            right = right.max(outline.px_bounds().max.x);
+        }
+        x += font.h_advance(id);
+    }
+    (right.max(x) + height * 0.1).ceil()
+}
 pub struct FontChoice {
     pub name: String,
     pub key: String,
@@ -105,8 +131,28 @@ pub struct FontChoice {
 pub struct Catalog {
     database: fontdb::Database,
     pub choices: Vec<FontChoice>,
+    picker_width: OnceLock<f32>,
 }
 impl Catalog {
+    /// Measure names in their own faces once, without retaining every font's data.
+    pub fn picker_width(&self) -> f32 {
+        *self.picker_width.get_or_init(|| {
+            self.choices.iter().fold(440_f32, |width, choice| {
+                let label = match choice.id {
+                    Some(id) => self
+                        .database
+                        .with_face_data(id, |data, index| {
+                            FontRef::try_from_slice_and_index(data, index)
+                                .ok()
+                                .map(|face| label_width(face, &choice.name, 20.))
+                        })
+                        .flatten(),
+                    None => self.load(choice).map(|font| font.preview_width(20.)),
+                };
+                width.max(label.unwrap_or(0.) + 32.)
+            })
+        })
+    }
     pub fn system() -> &'static Self {
         static CATALOG: OnceLock<Catalog> = OnceLock::new();
         CATALOG.get_or_init(|| {
@@ -135,7 +181,11 @@ impl Catalog {
                 },
             ];
             choices.extend(installed);
-            Self { database, choices }
+            Self {
+                database,
+                choices,
+                picker_width: OnceLock::new(),
+            }
         })
     }
     pub fn load(&self, choice: &FontChoice) -> Option<TextFont> {

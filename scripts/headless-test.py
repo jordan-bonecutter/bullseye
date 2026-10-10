@@ -202,6 +202,7 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             selected=wait_for(lambda:state() if 'font' in state()['buttons'] else None,'Font selector missing')
             click(*selected['buttons']['font'])
             selected=wait_for(lambda:state() if 'font-Hack' in state()['buttons'] else None,'Bundled monospace font missing')
+            assert selected['buttons']['font-results'][0] - selected['buttons']['font'][0] >= 140,'Font dropdown is too narrow'
             snapshot('font-picker.png')
 
             def visible_fonts():
@@ -382,6 +383,15 @@ with tempfile.TemporaryDirectory(prefix='bullseye-headless-', dir='/tmp') as tem
             drag(100,100,500,300)
             selected=wait_for(lambda:state() if state().get('toolbar_visible') else None,'HiDPI toolbar missing')
             assert selected['crop']==[200,200,800,400],selected
+            click(*selected['buttons']['t'])
+            selected=wait_for(lambda:state() if 'font' in state()['buttons'] else None,'HiDPI font selector missing')
+            click(*selected['buttons']['font'])
+            wait_for(lambda:'font-Hack' in state()['buttons'],'HiDPI font previews missing')
+            snapshot('font-picker-hidpi.png')
+            input_actions('type hack\nwait 150\n')
+            selected=wait_for(lambda:state() if visible_fonts()=={'font-Hack'} else None,'HiDPI font search did not focus')
+            click(*selected['buttons']['font-Hack'])
+            selected=wait_for(lambda:state() if state().get('font')=='Hack' and 'font-search' not in state()['buttons'] else None,'HiDPI font selection failed')
             click(*selected['buttons']['save'])
             assert overlay.wait(timeout=15)==0
             assert ImageChops.difference(Image.open(hidpi_path).convert('RGB'),base.crop((200,200,1000,600))).getbbox() is None
